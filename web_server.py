@@ -2530,44 +2530,6 @@ def run():
     except Exception:
         pass
 
-    def get_ipv4_addresses() -> List[str]:
-        ips: set[str] = set()
-        try:
-            hostname = socket.gethostname()
-            for item in socket.getaddrinfo(hostname, None, socket.AF_INET):
-                ip = item[4][0]
-                if ip and not ip.startswith("127."):
-                    ips.add(ip)
-            for ip in socket.gethostbyname_ex(hostname)[2]:
-                if ip and not ip.startswith("127."):
-                    ips.add(ip)
-        except Exception:
-            pass
-
-        if os.name == "nt":
-            try:
-                output = subprocess.check_output(["ipconfig"], text=True, errors="ignore")
-                for line in output.splitlines():
-                    line = line.strip()
-                    if "IPv4 Address" in line or "IPv4 アドレス" in line:
-                        parts = line.split(":")
-                        if len(parts) >= 2:
-                            ip = parts[-1].strip()
-                            if ip and not ip.startswith("127."):
-                                ips.add(ip)
-            except Exception:
-                pass
-        else:
-            try:
-                output = subprocess.check_output(["/sbin/ip", "-4", "addr"], text=True, errors="ignore")
-                for match in re.finditer(r"\\binet\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)", output):
-                    ip = match.group(1)
-                    if ip and not ip.startswith("127."):
-                        ips.add(ip)
-            except Exception:
-                pass
-        return sorted(ips)
-
     server.run()
 
 

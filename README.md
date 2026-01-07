@@ -1,10 +1,13 @@
 # Full-Search-PDFs
 
-System Version: 1.0.0  
-README File Version: 1.0.2
+System Version: 1.0.0
+README File Version: 1.0.3
 
-ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。  
+ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。
 UI は `static/` 配下で提供されます。
+
+> **注意**: 本アプリは社内LAN/家庭内LANでの利用を前提として設計されています。
+> インターネットに公開する場合は、認証機能の追加やCORS設定の見直しなど、追加のセキュリティ対策が必要です。
 
 ## 主要機能
 - PDF/DOCX/TXT/CSV/XLSX/XLS のテキスト抽出・検索
