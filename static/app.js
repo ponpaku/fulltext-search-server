@@ -1,0 +1,823 @@
+/**
+ * フォルダ内テキスト検索 — YomiToku Style
+ * System Version: 1.0.0
+ * File Version: 1.0.0
+ */
+
+const state = {
+  folders: [],
+  selected: new Set(),
+  mode: 'AND',
+  keywords: [],
+  viewMode: 'hit',
+  results: [],
+  folderListOpen: true,
+  isSearching: false,
+  spaceMode: 'none',
+  renderedCount: 0,
+  groupedResults: null,
+  isRenderingBatch: false,
+  fileModalFolderId: null,
+  fileModalFolderName: '',
+  fileModalScope: 'indexed',
+};
+
+// DOM Elements
+const $ = (id) => document.getElementById(id);
+const folderListEl = $('folderList');
+const folderStatusEl = $('folderStatus');
+const resultsEl = $('results');
+const resultCountEl = $('resultCount');
+const modeGroup = $('modeGroup');
+const rangeInput = $('range');
+const spaceModeSelect = $('spaceMode');
+const searchForm = $('searchForm');
+const queryInput = $('query');
+const viewToggle = $('viewToggle');
+const copyPathsBtn = $('copyPaths');
+const folderToggle = $('folderToggle');
+const refreshBtn = $('refreshFolders');
+const themeToggle = $('themeToggle');
+const helpToggle = $('helpToggle');
+const statusChips = $('statusChips');
+const fileModal = $('fileModal');
+const fileModalClose = $('fileModalClose');
+const fileModalTitle = $('fileModalTitle');
+const fileListContent = $('fileListContent');
+const fileScopeToggle = $('fileScopeToggle');
+const helpModal = $('helpModal');
+const helpModalClose = $('helpModalClose');
+
+// ═══════════════════════════════════════════════════════════════
+// CLIPBOARD PERMISSION
+// ═══════════════════════════════════════════════════════════════
+
+const requestClipboardPermission = async () => {
+  if (!navigator.permissions?.query) return true;
+  try {
+    const status = await navigator.permissions.query({ name: 'clipboard-write' });
+    if (status.state === 'denied') {
+      alert('クリップボード書き込みがブロックされています。ブラウザ設定で許可してください。');
+      return false;
+    }
+    if (status.state === 'prompt') {
+      const proceed = confirm('クリップボードへのコピー許可をブラウザに求めます。よろしいですか？');
+      if (!proceed) return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('clipboard permission check failed', err);
+    return true;
+  }
+};
+
+const copyTextToClipboard = async (text) => {
+  const allowed = await requestClipboardPermission();
+  if (!allowed) return false;
+
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      console.warn('navigator.clipboard failed, fallback to execCommand', err);
+    }
+  }
+
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.top = '-9999px';
+    textarea.setAttribute('readonly', '');
+    document.body.appendChild(textarea);
+    textarea.select();
+    const success = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    if (!success) throw new Error('execCommand copy failed');
+    return true;
+  } catch (err) {
+    console.warn('fallback copy failed', err);
+    alert('コピーに失敗しました');
+    return false;
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// THEME
+// ═══════════════════════════════════════════════════════════════
+
+const initTheme = () => {
+  const saved = localStorage.getItem('theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = saved || (prefersDark ? 'dark' : 'light');
+  document.documentElement.dataset.theme = theme;
+};
+
+const toggleTheme = () => {
+  const current = document.documentElement.dataset.theme;
+  const next = current === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem('theme', next);
+};
+
+// ═══════════════════════════════════════════════════════════════
+// STATUS CHIPS
+// ═══════════════════════════════════════════════════════════════
+
+const updateStatusChips = (folders) => {
+  const total = folders.length;
+  const ready = folders.filter(f => f.ready).length;
+  
+  if (total === 0) {
+    statusChips.innerHTML = '<span class="chip error">未設定</span>';
+  } else if (ready === total) {
+    statusChips.innerHTML = `
+      <span class="chip positive">${ready}/${total} 準備完了</span>
+      <span class="chip">検索可能</span>
+    `;
+  } else {
+    statusChips.innerHTML = `
+      <span class="chip warning">${ready}/${total} 準備中</span>
+    `;
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// FOLDER STATUS
+// ═══════════════════════════════════════════════════════════════
+
+const renderFolderStatus = (folders) => {
+  if (!folders.length) {
+    folderStatusEl.innerHTML = `
+      <div class="status-item error">
+        <span class="status-dot"></span>
+        <div class="status-info">
+          <span class="status-name">未設定</span>
+          <span class="status-detail">.env で SEARCH_FOLDERS を設定してください</span>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  folderStatusEl.innerHTML = folders.map(f => {
+    const statusClass = f.ready ? 'ready' : (f.message ? 'error' : '');
+    const indexed = f.stats?.indexed_files 
+      ? `${f.stats.indexed_files}/${f.stats.total_files ?? '-'} 件` 
+      : '';
+    
+    return `
+      <div class="status-item ${statusClass}" data-id="${f.id}">
+        <span class="status-dot"></span>
+        <div class="status-info">
+          <span class="status-name">${f.name}</span>
+          <span class="status-detail">${f.ready ? '検索可' : '処理中'} ${indexed} ${f.message || ''}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+};
+
+// ═══════════════════════════════════════════════════════════════
+// FOLDER LIST
+// ═══════════════════════════════════════════════════════════════
+
+const renderFolderList = (folders) => {
+  if (!folders.length) {
+    folderListEl.innerHTML = '<div class="loading-placeholder">フォルダが設定されていません</div>';
+    return;
+  }
+
+  folderListEl.innerHTML = folders.map(f => {
+    const checked = f.ready ? 'checked' : '';
+    const disabled = f.ready ? '' : 'disabled';
+    const fileCount = f.stats?.total_files ? `${f.stats.total_files} ファイル` : '';
+    
+    return `
+      <label class="folder-item ${f.ready && state.selected.has(f.id) ? 'selected' : ''}">
+        <input type="checkbox" data-id="${f.id}" ${checked} ${disabled}>
+        <div class="folder-info">
+          <div class="folder-name">${f.name}</div>
+          <div class="folder-path">${f.displayPath || f.path}</div>
+          <div class="folder-meta">
+            <span class="chip ${f.ready ? 'positive' : ''}">${f.ready ? '検索可' : '準備中'}</span>
+            ${fileCount ? `<span class="chip">${fileCount}</span>` : ''}
+          </div>
+        </div>
+      </label>
+    `;
+  }).join('');
+
+  // Event listeners
+  folderListEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    const folderId = cb.dataset.id;
+    if (cb.checked) state.selected.add(folderId);
+    
+    cb.addEventListener('change', () => {
+      if (cb.checked) {
+        state.selected.add(folderId);
+        cb.closest('.folder-item').classList.add('selected');
+      } else {
+        state.selected.delete(folderId);
+        cb.closest('.folder-item').classList.remove('selected');
+      }
+    });
+  });
+
+  folderListEl.classList.toggle('open', state.folderListOpen);
+};
+
+// ═══════════════════════════════════════════════════════════════
+// LOAD FOLDERS
+// ═══════════════════════════════════════════════════════════════
+
+const loadFolders = async () => {
+  folderStatusEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
+  folderListEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
+  refreshBtn.disabled = true;
+
+  try {
+    const res = await fetch('/api/folders');
+    const data = await res.json();
+    state.folders = data.folders || [];
+    state.selected = new Set(state.folders.filter(f => f.ready).map(f => f.id));
+    
+    updateStatusChips(state.folders);
+    renderFolderStatus(state.folders);
+    renderFolderList(state.folders);
+  } catch (err) {
+    folderStatusEl.innerHTML = `
+      <div class="status-item error">
+        <span class="status-dot"></span>
+        <div class="status-info">
+          <span class="status-name">エラー</span>
+          <span class="status-detail">フォルダ情報の取得に失敗しました</span>
+        </div>
+      </div>
+    `;
+    statusChips.innerHTML = '<span class="chip error">エラー</span>';
+    console.error(err);
+  } finally {
+    refreshBtn.disabled = false;
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// MODE SWITCHING
+// ═══════════════════════════════════════════════════════════════
+
+const setMode = (mode) => {
+  state.mode = mode;
+  modeGroup.querySelectorAll('.toggle-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+  rangeInput.disabled = mode === 'OR';
+  if (mode === 'OR') rangeInput.value = 0;
+};
+
+// ═══════════════════════════════════════════════════════════════
+// RESULT VIEW SWITCHING
+// ═══════════════════════════════════════════════════════════════
+
+const setViewMode = (mode) => {
+  state.viewMode = mode;
+  viewToggle.querySelectorAll('.toggle-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.view === mode);
+  });
+  renderResults();
+};
+
+const updateFolderToggleLabel = () => {
+  if (!folderToggle) return;
+  folderToggle.textContent = state.folderListOpen ? '閉じる' : '開く';
+};
+
+const toggleFolderList = () => {
+  state.folderListOpen = !state.folderListOpen;
+  folderListEl.classList.toggle('open', state.folderListOpen);
+  updateFolderToggleLabel();
+};
+
+// ═══════════════════════════════════════════════════════════════
+// FILE LIST MODAL
+// ═══════════════════════════════════════════════════════════════
+
+const closeFileModal = () => {
+  fileModal.classList.remove('open');
+  fileModal.setAttribute('aria-hidden', 'true');
+};
+
+const setFileScope = (scope) => {
+  if (!fileScopeToggle) return;
+  fileScopeToggle.querySelectorAll('.toggle-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.scope === scope);
+  });
+};
+
+const loadFileList = async (folderId, folderName, scope) => {
+  fileModalTitle.textContent = `${folderName} のファイル一覧`;
+  fileListContent.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
+
+  try {
+    const res = await fetch(`/api/folders/${folderId}/files?scope=${scope}`);
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || '取得に失敗しました');
+    }
+    const data = await res.json();
+    if (!data.files?.length) {
+      fileListContent.innerHTML = '<div class="loading-placeholder">ファイルがありません</div>';
+      return;
+    }
+
+    const items = data.files.map(f => {
+      const depth = f.relative.replace(/\\\\/g, '/').replace(/\\/g, '/').split('/').length - 1;
+      const safeRel = f.relative;
+      const reason = f.reason ? `<span class="file-reason">理由: ${f.reason}</span>` : '';
+      const statusLabel = data.scope === 'all'
+        ? `<span class="file-status ${f.indexed ? 'indexed' : 'missing'}">${f.indexed ? '済' : '未'}</span>`
+        : '';
+      return `
+        <div class="file-item" style="--depth:${depth}">
+          <div class="file-meta">
+            <span class="file-name">${safeRel}</span>
+            ${reason}
+          </div>
+          ${statusLabel}
+        </div>
+      `;
+    }).join('');
+    fileListContent.innerHTML = `
+      <div class="file-list">
+        ${items}
+      </div>
+    `;
+  } catch (err) {
+    fileListContent.innerHTML = `<div class="loading-placeholder">エラー: ${err.message}</div>`;
+    console.error(err);
+  }
+};
+
+const openFileModal = async (folderId, folderName) => {
+  fileModal.classList.add('open');
+  fileModal.setAttribute('aria-hidden', 'false');
+  state.fileModalFolderId = folderId;
+  state.fileModalFolderName = folderName;
+  state.fileModalScope = state.fileModalScope || 'indexed';
+  setFileScope(state.fileModalScope);
+  await loadFileList(folderId, folderName, state.fileModalScope);
+};
+
+if (fileScopeToggle) {
+  fileScopeToggle.addEventListener('click', (e) => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    const scope = btn.dataset.scope;
+    state.fileModalScope = scope;
+    setFileScope(scope);
+    if (state.fileModalFolderId) {
+      loadFileList(state.fileModalFolderId, state.fileModalFolderName, scope);
+    }
+  });
+}
+
+fileModal.addEventListener('click', (e) => {
+  if (e.target === fileModal) closeFileModal();
+});
+fileModalClose.addEventListener('click', closeFileModal);
+
+// ═══════════════════════════════════════════════════════════════
+// HELP MODAL
+// ═══════════════════════════════════════════════════════════════
+
+const closeHelpModal = () => {
+  helpModal.classList.remove('open');
+  helpModal.setAttribute('aria-hidden', 'true');
+};
+
+const openHelpModal = () => {
+  helpModal.classList.add('open');
+  helpModal.setAttribute('aria-hidden', 'false');
+};
+
+helpToggle.addEventListener('click', openHelpModal);
+helpModal.addEventListener('click', (e) => {
+  if (e.target === helpModal) closeHelpModal();
+});
+helpModalClose.addEventListener('click', closeHelpModal);
+
+const groupResultsByFile = (results) => {
+  const grouped = new Map();
+  results.forEach((hit, idx) => {
+    const existing = grouped.get(hit.path) || {
+      path: hit.path,
+      displayPath: hit.displayPath || hit.path,
+      file: hit.file,
+      folderName: hit.folderName || hit.folderId,
+      hits: [],
+      pages: new Set(),
+    };
+    if (hit.page && hit.page !== '-') existing.pages.add(hit.page);
+    existing.hits.push({ ...hit, _idx: idx });
+    grouped.set(hit.path, existing);
+  });
+
+  return Array.from(grouped.values()).map(g => ({
+    ...g,
+    pages: Array.from(g.pages).sort((a, b) => a - b),
+  }));
+};
+
+// ═══════════════════════════════════════════════════════════════
+// HIGHLIGHT TEXT
+// ═══════════════════════════════════════════════════════════════
+
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const buildFlexibleRegex = (keyword) => {
+  const compact = keyword.replace(/\s+/g, '');
+  const chars = Array.from(compact);
+  if (chars.length < 2 || chars.length > 64) return null;
+  const pattern = chars.map(ch => escapeRegex(ch)).join('\\s*');
+  return new RegExp(pattern, 'gi');
+};
+
+const highlightText = (text, keywords) => {
+  if (!keywords?.length) return text;
+  
+  let result = text;
+  keywords
+    .sort((a, b) => b.length - a.length)
+    .forEach(kw => {
+      if (!kw) return;
+      const escaped = escapeRegex(kw);
+      const regex = new RegExp(escaped, 'gi');
+      const strictApplied = result.replace(regex, match => `<span class="highlight">${match}</span>`);
+      if (strictApplied !== result) {
+        result = strictApplied;
+        return;
+      }
+      if (state.spaceMode !== 'none') {
+        const flex = buildFlexibleRegex(kw);
+        if (flex) {
+          result = result.replace(flex, match => `<span class="highlight">${match}</span>`);
+        }
+      }
+    });
+  return result;
+};
+
+// ═══════════════════════════════════════════════════════════════
+// RENDER RESULTS
+// ═══════════════════════════════════════════════════════════════
+
+const renderHitCards = (items) => {
+  return items.map((r, idx) => `
+    <div class="result-card" data-hit="${idx}">
+      <div class="result-header">
+        <div>
+          <div class="result-title">${r.file}</div>
+          <div class="result-path">${r.displayPath || r.path}</div>
+        </div>
+        <div class="result-actions">
+          <span class="chip">ページ ${r.page}</span>
+          <span class="chip">${r.folderName || r.folderId}</span>
+          <button type="button" class="chip-btn copy-btn" data-path="${r.displayPath || r.path}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2"/>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            コピー
+          </button>
+        </div>
+      </div>
+      <div class="result-context">${highlightText(r.context, state.keywords)}</div>
+      <div class="result-detail">
+        <div class="detail-text">${highlightText(r.detail || r.context, state.keywords)}</div>
+        <div class="detail-meta">
+          <span>フォルダ: ${r.folderName || r.folderId}</span>
+          <span>ページ: ${r.page}</span>
+          <span class="truncate">パス: ${r.displayPath || r.path}</span>
+        </div>
+      </div>
+    </div>
+  `).join('');
+};
+
+const renderFileCards = (groups) => {
+  return groups.map(g => `
+    <div class="result-card grouped" data-path="${g.path}">
+      <div class="result-header">
+        <div>
+          <div class="result-title">${g.file}</div>
+          <div class="result-path">${g.displayPath || g.path}</div>
+          <div class="expand-hint">クリックでヒット一覧を表示</div>
+        </div>
+        <div class="result-actions">
+          <span class="chip">${g.hits.length} ヒット</span>
+          ${g.pages.length ? `<span class="chip">${g.pages.length > 8 ? `該当ページ数：${g.pages.length}ページ` : `ページ ${g.pages.join(', ')}`}</span>` : ''}
+          <span class="chip">${g.folderName}</span>
+          <button type="button" class="chip-btn copy-btn" data-path="${g.displayPath || g.path}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2"/>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            コピー
+          </button>
+        </div>
+      </div>
+      <div class="grouped-hits">
+        ${g.hits.map(hit => `
+          <div class="hit-item" data-hit="${hit._idx}">
+            <div class="hit-summary">
+              <div class="hit-meta">
+                <span class="chip">ページ ${hit.page}</span>
+                <span class="chip subtle">${hit.folderName || hit.folderId}</span>
+              </div>
+              <div class="mini-snippet">${highlightText(hit.context, state.keywords)}</div>
+            </div>
+            <div class="result-detail">
+              <div class="detail-text">${highlightText(hit.detail || hit.context, state.keywords)}</div>
+              <div class="detail-meta">
+                <span>ページ: ${hit.page}</span>
+                <span class="truncate">パス: ${hit.displayPath || hit.path}</span>
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+};
+
+const setExpandHint = (card, expanded) => {
+  const hint = card.querySelector('.expand-hint');
+  if (!hint) return;
+  hint.textContent = expanded ? 'クリックで閉じる' : 'クリックでヒット一覧を表示';
+};
+
+const bindResultHandlers = (root) => {
+  root.querySelectorAll('.copy-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const ok = await copyTextToClipboard(btn.dataset.path);
+      if (!ok) return;
+      const originalHTML = btn.innerHTML;
+      btn.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M20 6L9 17l-5-5"/>
+        </svg>
+        完了
+      `;
+      btn.classList.add('positive');
+      setTimeout(() => {
+        btn.innerHTML = originalHTML;
+        btn.classList.remove('positive');
+      }, 1500);
+    });
+  });
+
+  root.querySelectorAll('.result-card').forEach(card => {
+    setExpandHint(card, card.classList.contains('expanded'));
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('.copy-btn')) return;
+      if (e.target.closest('.hit-item')) return;
+      card.classList.toggle('expanded');
+      setExpandHint(card, card.classList.contains('expanded'));
+    });
+  });
+
+  root.querySelectorAll('.hit-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('.copy-btn')) return;
+      item.classList.toggle('expanded');
+      const card = item.closest('.result-card');
+      if (card) {
+        card.classList.add('expanded');
+        setExpandHint(card, true);
+      }
+    });
+  });
+};
+
+const resetRenderState = () => {
+  state.renderedCount = 0;
+  state.groupedResults = null;
+  state.isRenderingBatch = false;
+};
+
+const currentRenderList = () => {
+  if (state.viewMode === 'file') {
+    if (!state.groupedResults) state.groupedResults = groupResultsByFile(state.results);
+    return state.groupedResults;
+  }
+  return state.results;
+};
+
+const appendNextBatch = () => {
+  if (state.isRenderingBatch) return;
+  const list = currentRenderList();
+  if (state.renderedCount >= list.length) return;
+  state.isRenderingBatch = true;
+  const start = state.renderedCount;
+  const end = Math.min(start + 100, list.length);
+  const slice = list.slice(start, end);
+  const listEl = resultsEl.querySelector('.results-list');
+  const html = state.viewMode === 'file'
+    ? renderFileCards(slice)
+    : renderHitCards(slice);
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+  bindResultHandlers(temp);
+  Array.from(temp.children).forEach(node => listEl.appendChild(node));
+  state.renderedCount = end;
+  state.isRenderingBatch = false;
+};
+
+const handleResultsScroll = () => {
+  if (!state.results.length || state.isRenderingBatch) return;
+  if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 200) {
+    appendNextBatch();
+  }
+};
+
+const renderResults = (payload) => {
+  if (payload) {
+    const { results, keywords } = payload;
+    state.results = results || [];
+    state.keywords = keywords || [];
+  }
+
+  resultCountEl.textContent = `${state.results.length} 件`;
+
+  if (!state.results.length) {
+    resultsEl.innerHTML = `
+      <div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="11" cy="11" r="8"/>
+          <path d="m21 21-4.35-4.35"/>
+          <path d="M8 11h6"/>
+        </svg>
+        <p class="empty-title">一致なし</p>
+        <p class="empty-sub">別のキーワードやフォルダでお試しください。</p>
+      </div>
+    `;
+    return;
+  }
+  resetRenderState();
+  resultsEl.innerHTML = '<div class="results-list"></div>';
+  resultsEl.scrollTop = 0;
+  appendNextBatch();
+  while (resultsEl.scrollHeight <= resultsEl.clientHeight + 40) {
+    if (state.renderedCount >= currentRenderList().length) break;
+    appendNextBatch();
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// SEARCH
+// ═══════════════════════════════════════════════════════════════
+
+const runSearch = async (evt) => {
+  evt?.preventDefault();
+  if (state.isSearching) return;
+
+  const query = queryInput.value.trim();
+  const rangeVal = parseInt(rangeInput.value || '0', 10);
+  const spaceMode = spaceModeSelect?.value || 'none';
+  const payload = {
+    query,
+    mode: state.mode,
+    range_limit: state.mode === 'AND' ? rangeVal : 0,
+    space_mode: spaceMode,
+    folders: Array.from(state.selected),
+  };
+  state.spaceMode = spaceMode;
+
+  if (!payload.query) {
+    alert('キーワードを入力してください');
+    queryInput.focus();
+    return;
+  }
+  if (!payload.folders.length) {
+    alert('検索対象フォルダを選択してください');
+    return;
+  }
+
+  state.isSearching = true;
+  resultsEl.innerHTML = `
+    <div class="loading-state">
+      <div class="loading-spinner"></div>
+      <p class="loading-text">検索中...</p>
+    </div>
+  `;
+
+  try {
+    const res = await fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || '検索に失敗しました');
+    }
+    const data = await res.json();
+    renderResults(data);
+  } catch (err) {
+    resultsEl.innerHTML = `
+      <div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M15 9l-6 6M9 9l6 6"/>
+        </svg>
+        <p class="empty-title">エラー</p>
+        <p class="empty-sub">${err.message}</p>
+      </div>
+    `;
+    console.error(err);
+  } finally {
+    state.isSearching = false;
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// EVENT LISTENERS
+// ═══════════════════════════════════════════════════════════════
+
+themeToggle.addEventListener('click', toggleTheme);
+
+modeGroup.addEventListener('click', (e) => {
+  const btn = e.target.closest('.toggle-btn');
+  if (btn) setMode(btn.dataset.mode);
+});
+
+folderToggle.addEventListener('click', toggleFolderList);
+
+viewToggle.addEventListener('click', (e) => {
+  const btn = e.target.closest('.toggle-btn');
+  if (btn) setViewMode(btn.dataset.view);
+});
+
+resultsEl.addEventListener('scroll', handleResultsScroll);
+
+searchForm.addEventListener('submit', runSearch);
+refreshBtn.addEventListener('click', loadFolders);
+
+copyPathsBtn.addEventListener('click', async () => {
+  const paths = state.folders
+    .filter(f => state.selected.has(f.id))
+    .map(f => f.displayPath || f.path)
+    .join('\n');
+  
+  if (!paths) {
+    alert('コピー対象がありません');
+    return;
+  }
+  
+  const ok = await copyTextToClipboard(paths);
+  if (!ok) return;
+  const originalHTML = copyPathsBtn.innerHTML;
+  copyPathsBtn.innerHTML = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M20 6L9 17l-5-5"/>
+    </svg>
+    完了
+  `;
+  setTimeout(() => {
+    copyPathsBtn.innerHTML = originalHTML;
+  }, 1500);
+});
+
+folderStatusEl.addEventListener('click', (e) => {
+  const item = e.target.closest('.status-item');
+  if (!item) return;
+  const folderId = item.dataset.id;
+  const folder = state.folders.find(f => f.id === folderId);
+  if (!folder) return;
+  if (!folder.ready) {
+    alert('このフォルダは準備中です');
+    return;
+  }
+  openFileModal(folderId, folder.name);
+});
+
+// Keyboard shortcut: Ctrl+Enter to search
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    runSearch();
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════
+
+window.addEventListener('DOMContentLoaded', () => {
+  initTheme();
+  setMode('AND');
+  loadFolders();
+  queryInput.focus();
+  updateFolderToggleLabel();
+});

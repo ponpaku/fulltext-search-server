@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>フォルダ内テキスト検索</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <!-- Header -->
+    <header class="hero">
+      <div class="hero-left">
+        <div class="brand">
+          <div class="eyebrow">MEMORY-FIRST SEARCH</div>
+          <h1>フォルダ内テキスト検索</h1>
+        </div>
+        <div class="status-row" id="statusChips">
+          <span class="chip">読込中...</span>
+        </div>
+      </div>
+      <div class="hero-right">
+        <button type="button" class="theme-toggle" id="themeToggle" title="テーマ切替">
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="5"/>
+            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+          </svg>
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <div class="main-grid">
+      <!-- Left Column: Search Form -->
+      <div class="panel">
+        <div class="panel-header">
+          <h2>検索設定</h2>
+          <button type="button" class="chip-btn" id="refreshFolders" title="フォルダ再読込">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+              <path d="M3 3v5h5"/>
+              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+              <path d="M16 21h5v-5"/>
+            </svg>
+            再読込
+          </button>
+        </div>
+
+        <form id="searchForm" class="search-form">
+          <!-- Keyword Input -->
+          <div class="form-group">
+            <label for="query">キーワード</label>
+            <div class="input-row">
+              <input 
+                type="text" 
+                id="query" 
+                name="query" 
+                placeholder="例: 規約 AND 2023" 
+                autocomplete="off"
+                required
+              >
+              <button type="submit" class="btn btn-primary">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"/>
+                  <path d="m21 21-4.35-4.35"/>
+                </svg>
+                検索
+              </button>
+            </div>
+          </div>
+
+          <!-- Options Row -->
+          <div class="options-row">
+            <div class="form-group compact">
+              <label>モード</label>
+              <div class="toggle-group" id="modeGroup">
+                <button type="button" class="toggle-btn active" data-mode="AND">AND</button>
+                <button type="button" class="toggle-btn" data-mode="OR">OR</button>
+              </div>
+            </div>
+            <div class="form-group compact">
+              <label for="range">範囲（文字数）</label>
+              <input type="number" id="range" min="0" max="5000" value="0" class="input-sm">
+              <span class="hint">AND時のみ有効</span>
+            </div>
+          </div>
+
+          <!-- Folder Selection -->
+          <div class="form-group">
+            <div class="label-row">
+              <label>対象フォルダ</label>
+              <button type="button" class="text-btn" id="copyPaths">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2"/>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+                パスをコピー
+              </button>
+            </div>
+            <div class="folder-list" id="folderList">
+              <div class="loading-placeholder">読み込み中...</div>
+            </div>
+          </div>
+        </form>
+
+        <!-- Index Status -->
+        <div class="status-section">
+          <div class="status-header">
+            <h3>インデックス状態</h3>
+            <span class="hint">.env の SEARCH_FOLDERS を監視</span>
+          </div>
+          <div class="status-list" id="folderStatus">
+            <div class="loading-placeholder">読み込み中...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Results -->
+      <div class="panel panel-results">
+        <div class="panel-header">
+          <div class="panel-title">
+            <h2>検索結果</h2>
+            <span class="result-count" id="resultCount">0 件</span>
+          </div>
+          <div class="toggle-group compact" id="viewToggle" title="表示切替">
+            <button type="button" class="toggle-btn active" data-view="hit">ヒット単位</button>
+            <button type="button" class="toggle-btn" data-view="file">ファイル単位</button>
+          </div>
+        </div>
+        <div class="results-container" id="results">
+          <div class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="11" cy="11" r="8"/>
+              <path d="m21 21-4.35-4.35"/>
+            </svg>
+            <p class="empty-title">まだ検索していません</p>
+            <p class="empty-sub">キーワードと対象フォルダを選んで検索を実行してください。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>フォルダ内テキスト検索 — FastAPI / ローカル専用 / インデックス再利用</span>
+    </footer>
+  </div>
+
+  <!-- File Modal -->
+  <div class="modal-backdrop" id="fileModal" aria-hidden="true">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="fileModalTitle">インデックス済みファイル</h3>
+        <button type="button" class="modal-close" id="fileModalClose" aria-label="閉じる">×</button>
+      </div>
+      <div class="modal-body" id="fileListContent">
+        <div class="loading-placeholder">読み込み中...</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
