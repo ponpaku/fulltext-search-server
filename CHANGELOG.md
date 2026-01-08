@@ -36,6 +36,14 @@ System Version: 1.1.0
 - 2026-01-08: リファクタリング: 重複した検索ロジック関数を共通ヘルパー関数に統合（`_find_raw_hit_position`, `_build_search_result`）。
 - 2026-01-08: リファクタリング: `/api/search` エンドポイントのキャッシュ取得ロジックをヘルパー関数に抽出（`_try_get_memory_cache`, `_try_get_fixed_cache`）。
 - 2026-01-08: 不要な静的ファイル `index - コピー.html` を削除。
+- 2026-01-08: 機能追加: 段階的ハッシングによる差分更新の精度向上（issue #4 対応）。
+  - `file_state.jsonl` による前回状態の保存・参照（DB不要）
+  - 段階的な差分判定: stat（size + mtime_ns + inode/file_id） → fast fingerprint → full hash
+  - `DIFF_MODE` 設定: `stat` / `stat+fastfp` / `stat+fastfp+fullhash`（デフォルト: `stat`）
+  - fast fingerprint: 先頭/末尾チャンクのハッシュ（`FAST_FP_BYTES` で設定可能、デフォルト: 64KB）
+  - full hash: 条件付きフルハッシュ（`FULL_HASH_ALGO`, `FULL_HASH_PATHS`, `FULL_HASH_EXTS` で設定可能）
+  - 削除検知の安全策: 2回連続で不在の場合のみ削除として扱う（瞬断対策）
+  - mtime保持・同サイズ更新などの見逃しを防止
 
 ## 1.0.0
 

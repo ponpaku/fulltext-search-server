@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.0"
-# File Version: 1.2.5
+# File Version: 1.3.0
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -59,6 +59,9 @@ QUERY_STATS_PATH = CACHE_DIR / "query_stats.json"
 BUILD_DIR = INDEX_DIR / ".build"
 BUILD_DIR.mkdir(exist_ok=True)
 CURRENT_POINTER_FILE = INDEX_DIR / "current.txt"
+
+# --- 段階的ハッシング定数 ---
+FILE_STATE_FILENAME = "file_state.jsonl"
 
 # --- 検索表示定数 ---
 SNIPPET_PREFIX_CHARS = 40
@@ -1426,6 +1429,332 @@ def index_path_for(folder_path: str, gen_dir: Path | None = None) -> Path:
     return gen_dir / f"index_{hashed}_{INDEX_VERSION}.pkl.gz"
 
 
+def file_state_path_for(folder_path: str, gen_dir: Path | None = None) -> Path:
+    """file_state.jsonl のパスを取得（世代ディレクトリ対応）."""
+    hashed = hashlib.sha256(folder_path.encode("utf-8")).hexdigest()[:12]
+    if gen_dir is None:
+        gen_dir = get_current_generation_dir()
+    return gen_dir / f"file_state_{hashed}.jsonl"
+
+
+def load_file_state(folder_path: str, gen_dir: Path | None = None) -> Dict[str, Dict]:
+    """file_state.jsonl をディスクから読み込み（世代ディレクトリ対応）."""
+    state_path = file_state_path_for(folder_path, gen_dir)
+    if not state_path.exists():
+        return {}
+    try:
+        states = {}
+        with open(state_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                states[entry["path"]] = entry
+        return states
+    except Exception:
+        return {}
+
+
+def save_file_state(folder_path: str, states: Dict[str, Dict], gen_dir: Path | None = None):
+    """file_state.jsonl をディスクに保存（世代ディレクトリ対応）."""
+    state_path = file_state_path_for(folder_path, gen_dir)
+    if gen_dir is not None:
+        gen_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            for path_str in sorted(states.keys()):
+                f.write(json.dumps(states[path_str], ensure_ascii=False) + "\n")
+    except Exception:
+        # 保存失敗時は静かにスキップ
+        return
+
+
+def get_file_stat(path_str: str) -> Dict:
+    """ファイルの stat 情報を取得（size, mtime_ns, inode/file_id）."""
+    try:
+        stat_info = os.stat(path_str)
+        result = {
+            "size": stat_info.st_size,
+            "mtime_ns": stat_info.st_mtime_ns,
+        }
+        # inode (Unix系) または file_id (Windows) を追加
+        if hasattr(stat_info, "st_ino") and stat_info.st_ino != 0:
+            result["inode"] = stat_info.st_ino
+        # Windowsの場合はfile indexを取得（可能なら）
+        if os.name == "nt":
+            try:
+                import ctypes
+                from ctypes import wintypes
+                kernel32 = ctypes.windll.kernel32
+                GENERIC_READ = 0x80000000
+                FILE_SHARE_READ = 0x00000001
+                OPEN_EXISTING = 3
+                FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+
+                handle = kernel32.CreateFileW(
+                    path_str,
+                    GENERIC_READ,
+                    FILE_SHARE_READ,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                    None
+                )
+                if handle != -1:
+                    class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+                        _fields_ = [
+                            ("dwFileAttributes", wintypes.DWORD),
+                            ("ftCreationTime", wintypes.FILETIME),
+                            ("ftLastAccessTime", wintypes.FILETIME),
+                            ("ftLastWriteTime", wintypes.FILETIME),
+                            ("dwVolumeSerialNumber", wintypes.DWORD),
+                            ("nFileSizeHigh", wintypes.DWORD),
+                            ("nFileSizeLow", wintypes.DWORD),
+                            ("nNumberOfLinks", wintypes.DWORD),
+                            ("nFileIndexHigh", wintypes.DWORD),
+                            ("nFileIndexLow", wintypes.DWORD),
+                        ]
+                    info = BY_HANDLE_FILE_INFORMATION()
+                    if kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+                        file_id = (info.nFileIndexHigh << 32) | info.nFileIndexLow
+                        result["file_id"] = file_id
+                    kernel32.CloseHandle(handle)
+            except Exception:
+                pass
+        return result
+    except Exception:
+        return {}
+
+
+def compute_fast_fingerprint(path_str: str, chunk_bytes: int = 65536) -> str | None:
+    """fast fingerprint を計算（先頭/末尾 N バイト + size）."""
+    try:
+        stat_info = os.stat(path_str)
+        file_size = stat_info.st_size
+
+        hasher = hashlib.sha256()
+        hasher.update(str(file_size).encode())
+
+        with open(path_str, "rb") as f:
+            # 先頭チャンク
+            head_chunk = f.read(chunk_bytes)
+            hasher.update(head_chunk)
+
+            # 末尾チャンク（ファイルが十分大きい場合）
+            if file_size > chunk_bytes:
+                f.seek(-min(chunk_bytes, file_size - len(head_chunk)), 2)
+                tail_chunk = f.read(chunk_bytes)
+                hasher.update(tail_chunk)
+
+        return hasher.hexdigest()
+    except Exception:
+        return None
+
+
+def compute_full_hash(path_str: str, algo: str = "sha256") -> str | None:
+    """full hash を計算."""
+    try:
+        hasher = hashlib.new(algo)
+        with open(path_str, "rb") as f:
+            while chunk := f.read(1048576):  # 1MB chunks
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception:
+        return None
+
+
+def should_compute_full_hash(path_str: str) -> bool:
+    """full hash を計算すべきかどうか判定."""
+    # FULL_HASH_PATHS: カンマ区切りのパス接頭辞リスト
+    full_hash_paths = os.getenv("FULL_HASH_PATHS", "").strip()
+    if full_hash_paths:
+        for prefix in full_hash_paths.split(","):
+            prefix = prefix.strip()
+            if prefix and path_str.startswith(prefix):
+                return True
+
+    # FULL_HASH_EXTS: カンマ区切りの拡張子リスト
+    full_hash_exts = os.getenv("FULL_HASH_EXTS", "").strip()
+    if full_hash_exts:
+        ext = os.path.splitext(path_str)[1].lower()
+        for target_ext in full_hash_exts.split(","):
+            target_ext = target_ext.strip().lower()
+            if target_ext and ext == target_ext:
+                return True
+
+    # ネットワークドライブ判定（UNCパス or SMBマウント）
+    if os.name == "nt":
+        # Windows: UNCパス (\\server\share\...) または ネットワークドライブ
+        if path_str.startswith("\\\\") or path_str.startswith("//"):
+            return True
+    else:
+        # Unix系: /mnt, /net, /Volumes などの典型的なマウントポイント
+        mount_prefixes = ["/mnt/", "/net/", "/Volumes/"]
+        for prefix in mount_prefixes:
+            if path_str.startswith(prefix):
+                return True
+
+    return False
+
+
+def should_reindex_file(
+    path_str: str,
+    current_stat: Dict,
+    prev_state: Dict | None,
+    diff_mode: str,
+    fast_fp_bytes: int,
+    full_hash_algo: str,
+) -> Tuple[bool, Dict]:
+    """
+    段階的な差分判定を行い、再インデックスが必要かどうかを返す.
+
+    Returns:
+        (should_reindex, updated_state): 再インデックス要否と更新後の state
+    """
+    # 前回の状態がない場合は再インデックス必要
+    if not prev_state:
+        new_state = {
+            "path": path_str,
+            "size": current_stat.get("size"),
+            "mtime_ns": current_stat.get("mtime_ns"),
+            "last_indexed_at": time.time(),
+            "deletion_candidate_since": None,
+        }
+        if "inode" in current_stat:
+            new_state["inode"] = current_stat["inode"]
+        if "file_id" in current_stat:
+            new_state["file_id"] = current_stat["file_id"]
+        return True, new_state
+
+    # Stage 1: stat 比較
+    stat_changed = False
+    if current_stat.get("size") != prev_state.get("size"):
+        stat_changed = True
+    elif current_stat.get("mtime_ns") != prev_state.get("mtime_ns"):
+        stat_changed = True
+    elif "inode" in current_stat and "inode" in prev_state:
+        if current_stat["inode"] != prev_state["inode"]:
+            stat_changed = True
+    elif "file_id" in current_stat and "file_id" in prev_state:
+        if current_stat["file_id"] != prev_state["file_id"]:
+            stat_changed = True
+
+    if not stat_changed:
+        # stat が変わっていない場合は、削除候補をクリアして前回の状態を保持
+        updated_state = prev_state.copy()
+        updated_state["deletion_candidate_since"] = None
+        return False, updated_state
+
+    # stat モードの場合はここで終了（変更あり）
+    if diff_mode == "stat":
+        new_state = {
+            "path": path_str,
+            "size": current_stat.get("size"),
+            "mtime_ns": current_stat.get("mtime_ns"),
+            "last_indexed_at": time.time(),
+            "deletion_candidate_since": None,
+        }
+        if "inode" in current_stat:
+            new_state["inode"] = current_stat["inode"]
+        if "file_id" in current_stat:
+            new_state["file_id"] = current_stat["file_id"]
+        return True, new_state
+
+    # Stage 2: fast fingerprint 比較
+    if diff_mode in {"stat+fastfp", "stat+fastfp+fullhash"}:
+        current_fp = compute_fast_fingerprint(path_str, fast_fp_bytes)
+        prev_fp = prev_state.get("fast_fp")
+
+        if current_fp and prev_fp and current_fp == prev_fp:
+            # fast fingerprint が一致する場合は変更なし
+            updated_state = prev_state.copy()
+            updated_state["size"] = current_stat.get("size")
+            updated_state["mtime_ns"] = current_stat.get("mtime_ns")
+            if "inode" in current_stat:
+                updated_state["inode"] = current_stat["inode"]
+            if "file_id" in current_stat:
+                updated_state["file_id"] = current_stat["file_id"]
+            updated_state["deletion_candidate_since"] = None
+            return False, updated_state
+
+        # fast fingerprint が異なる、または計算できない場合
+        if diff_mode == "stat+fastfp":
+            new_state = {
+                "path": path_str,
+                "size": current_stat.get("size"),
+                "mtime_ns": current_stat.get("mtime_ns"),
+                "fast_fp": current_fp,
+                "last_indexed_at": time.time(),
+                "deletion_candidate_since": None,
+            }
+            if "inode" in current_stat:
+                new_state["inode"] = current_stat["inode"]
+            if "file_id" in current_stat:
+                new_state["file_id"] = current_stat["file_id"]
+            return True, new_state
+
+    # Stage 3: full hash 比較（条件付き）
+    if diff_mode == "stat+fastfp+fullhash" and should_compute_full_hash(path_str):
+        current_hash = compute_full_hash(path_str, full_hash_algo)
+        prev_hash = prev_state.get("full_hash")
+
+        if current_hash and prev_hash and current_hash == prev_hash:
+            # full hash が一致する場合は変更なし
+            updated_state = prev_state.copy()
+            updated_state["size"] = current_stat.get("size")
+            updated_state["mtime_ns"] = current_stat.get("mtime_ns")
+            if "inode" in current_stat:
+                updated_state["inode"] = current_stat["inode"]
+            if "file_id" in current_stat:
+                updated_state["file_id"] = current_stat["file_id"]
+            # fast fingerprint を更新
+            if diff_mode in {"stat+fastfp", "stat+fastfp+fullhash"}:
+                current_fp = compute_fast_fingerprint(path_str, fast_fp_bytes)
+                if current_fp:
+                    updated_state["fast_fp"] = current_fp
+            updated_state["deletion_candidate_since"] = None
+            return False, updated_state
+
+        # full hash が異なる、または計算できない場合
+        new_state = {
+            "path": path_str,
+            "size": current_stat.get("size"),
+            "mtime_ns": current_stat.get("mtime_ns"),
+            "last_indexed_at": time.time(),
+            "deletion_candidate_since": None,
+        }
+        if "inode" in current_stat:
+            new_state["inode"] = current_stat["inode"]
+        if "file_id" in current_stat:
+            new_state["file_id"] = current_stat["file_id"]
+        if diff_mode in {"stat+fastfp", "stat+fastfp+fullhash"}:
+            current_fp = compute_fast_fingerprint(path_str, fast_fp_bytes)
+            if current_fp:
+                new_state["fast_fp"] = current_fp
+        if current_hash:
+            new_state["full_hash"] = current_hash
+        return True, new_state
+
+    # それ以外の場合は変更ありとして処理
+    new_state = {
+        "path": path_str,
+        "size": current_stat.get("size"),
+        "mtime_ns": current_stat.get("mtime_ns"),
+        "last_indexed_at": time.time(),
+        "deletion_candidate_since": None,
+    }
+    if "inode" in current_stat:
+        new_state["inode"] = current_stat["inode"]
+    if "file_id" in current_stat:
+        new_state["file_id"] = current_stat["file_id"]
+    if diff_mode in {"stat+fastfp", "stat+fastfp+fullhash"}:
+        current_fp = compute_fast_fingerprint(path_str, fast_fp_bytes)
+        if current_fp:
+            new_state["fast_fp"] = current_fp
+    return True, new_state
+
+
 def load_index_from_disk(folder_path: str, gen_dir: Path | None = None) -> Dict[str, Dict]:
     """インデックスをディスクから読み込み（世代ディレクトリ対応）."""
     idx_path = index_path_for(folder_path, gen_dir)
@@ -1466,12 +1795,21 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
     """インデックス作成（差分更新 & 高精度固定）."""
     start_time = time.time()
 
-    # 差分更新のため、前回の世代から既存キャッシュを読み込む
+    # 段階的ハッシング設定を読み込み
+    diff_mode = os.getenv("DIFF_MODE", "stat").strip().lower()
+    if diff_mode not in {"stat", "stat+fastfp", "stat+fastfp+fullhash"}:
+        diff_mode = "stat"
+    fast_fp_bytes = int(os.getenv("FAST_FP_BYTES", "65536").strip())
+    full_hash_algo = os.getenv("FULL_HASH_ALGO", "sha256").strip()
+
+    # 差分更新のため、前回の世代から既存キャッシュとファイル状態を読み込む
     if prev_gen_dir is not None and prev_gen_dir.exists():
         existing_cache = load_index_from_disk(folder, prev_gen_dir)
+        prev_file_states = load_file_state(folder, prev_gen_dir)
     else:
         # フォールバック: 現在の世代から読み込む（初回起動時など）
         existing_cache = load_index_from_disk(folder, gen_dir)
+        prev_file_states = load_file_state(folder, gen_dir)
     failures = {k: v for k, v in (previous_failures or {}).items()}
     all_files = scan_files(folder)
     if not all_files and existing_cache:
@@ -1511,13 +1849,47 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
     valid_cache = {
         path: meta for path, meta in existing_cache.items() if path in current_map
     }
+
+    # 削除検知の安全策: 削除候補の処理
+    current_file_states: Dict[str, Dict] = {}
+    for path_str in prev_file_states:
+        if path_str not in current_map:
+            # ファイルが見つからない
+            prev_state = prev_file_states[path_str]
+            if prev_state.get("deletion_candidate_since"):
+                # 2回目の不在 → 削除として扱う（インデックスから除外）
+                if path_str in valid_cache:
+                    del valid_cache[path_str]
+                log_info(f"削除検知: {path_str}")
+            else:
+                # 1回目の不在 → 削除候補としてマーク
+                prev_state["deletion_candidate_since"] = time.time()
+                current_file_states[path_str] = prev_state
+                log_info(f"削除候補: {path_str}")
+
+    # 段階的ハッシングによる差分判定
     targets = []
     for path_str, path_obj in current_map.items():
-        mtime = os.path.getmtime(path_str)
-        cached = valid_cache.get(path_str)
-        if cached and cached.get("mtime") == mtime and cached.get("high_acc"):
+        current_stat = get_file_stat(path_str)
+        if not current_stat:
+            # stat 取得失敗 → 再インデックス対象
+            targets.append(path_obj)
+            current_file_states[path_str] = {
+                "path": path_str,
+                "last_indexed_at": time.time(),
+                "deletion_candidate_since": None,
+            }
             continue
-        targets.append(path_obj)
+
+        prev_state = prev_file_states.get(path_str)
+        should_reindex, new_state = should_reindex_file(
+            path_str, current_stat, prev_state, diff_mode, fast_fp_bytes, full_hash_algo
+        )
+
+        if should_reindex:
+            targets.append(path_obj)
+
+        current_file_states[path_str] = new_state
 
     updated_data: Dict[str, Dict] = {}
     if targets:
@@ -1551,6 +1923,9 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
     valid_cache.update(updated_data)
     failures = {k: v for k, v in failures.items() if k not in valid_cache}
     save_index_to_disk(folder, valid_cache, gen_dir)
+
+    # ファイル状態を保存
+    save_file_state(folder, current_file_states, gen_dir)
 
     stats = {
         "total_files": len(all_files),
