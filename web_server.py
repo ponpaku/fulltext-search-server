@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.0"
-# File Version: 1.1.0
+# File Version: 1.2.0
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -54,6 +54,11 @@ CACHE_DIR = BASE_DIR / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 FIXED_CACHE_INDEX = CACHE_DIR / "fixed_cache_index.json"
 QUERY_STATS_PATH = CACHE_DIR / "query_stats.json"
+
+# --- 世代ディレクトリ定数 ---
+BUILD_DIR = INDEX_DIR / ".build"
+BUILD_DIR.mkdir(exist_ok=True)
+CURRENT_POINTER_FILE = INDEX_DIR / "current.txt"
 
 # --- 検索表示定数 ---
 SNIPPET_PREFIX_CHARS = 40
@@ -1148,13 +1153,237 @@ def run_search_direct(
 
 
 # --- インデックス関連 ---
-def index_path_for(folder_path: str) -> Path:
+
+# --- 世代管理ユーティリティ ---
+def create_generation_uuid() -> str:
+    """新しい世代UUIDを生成（タイムスタンプ + ランダム）."""
+    import uuid
+    timestamp = int(time.time())
+    random_part = uuid.uuid4().hex[:8]
+    return f"{timestamp}_{random_part}"
+
+
+def get_current_generation_pointer() -> str | None:
+    """currentポインターファイルから世代名を取得."""
+    if not CURRENT_POINTER_FILE.exists():
+        return None
+    try:
+        gen_name = CURRENT_POINTER_FILE.read_text(encoding="utf-8").strip()
+        return gen_name if gen_name else None
+    except Exception:
+        return None
+
+
+def set_current_generation_pointer(gen_name: str) -> None:
+    """currentポインターファイルに世代名を設定（原子的）."""
+    temp_file = CURRENT_POINTER_FILE.with_suffix(".tmp")
+    try:
+        temp_file.write_text(gen_name, encoding="utf-8")
+        temp_file.replace(CURRENT_POINTER_FILE)
+    except Exception as e:
+        log_warn(f"currentポインター設定失敗: {e}")
+        if temp_file.exists():
+            temp_file.unlink()
+
+
+def get_generation_dir(gen_name: str | None = None, build: bool = False) -> Path:
+    """世代ディレクトリのパスを取得."""
+    if gen_name is None:
+        gen_name = get_current_generation_pointer()
+        if gen_name is None:
+            return INDEX_DIR
+    base = BUILD_DIR if build else INDEX_DIR
+    return base / f"gen_{gen_name}"
+
+
+def get_current_generation_dir() -> Path:
+    """現在の世代ディレクトリを取得（存在しない場合は INDEX_DIR を返す）."""
+    gen_name = get_current_generation_pointer()
+    if gen_name:
+        gen_dir = get_generation_dir(gen_name, build=False)
+        if gen_dir.exists():
+            return gen_dir
+    return INDEX_DIR
+
+
+def create_manifest(gen_name: str, gen_dir: Path, folder_states_snapshot: Dict) -> Dict:
+    """manifest.json を作成."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    folder_paths = sorted([meta["path"] for meta in folder_states_snapshot.values()])
+    source_folders_hash = hashlib.sha256(
+        "|".join(folder_paths).encode("utf-8")
+    ).hexdigest()
+
+    folders_info = {}
+    for folder_id, meta in folder_states_snapshot.items():
+        path = meta["path"]
+        hashed = hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
+        index_file = f"index_{hashed}_{INDEX_VERSION}.pkl.gz"
+        index_path = gen_dir / index_file
+        file_count = 0
+        if index_path.exists():
+            try:
+                with gzip.open(index_path, "rb") as f:
+                    data = pickle.load(f)
+                    if isinstance(data, dict):
+                        file_count = len(data)
+            except Exception:
+                pass
+
+        folders_info[folder_id] = {
+            "path": path,
+            "name": meta["name"],
+            "file_count": file_count,
+            "index_file": index_file,
+        }
+
+    manifest = {
+        "index_uuid": gen_name,
+        "schema_version": INDEX_VERSION,
+        "created_at": now.isoformat(),
+        "created_timestamp": int(now.timestamp()),
+        "source_folders_hash": source_folders_hash,
+        "folders": folders_info,
+    }
+
+    return manifest
+
+
+def save_manifest(gen_dir: Path, manifest: Dict) -> None:
+    """manifest.json を保存."""
+    manifest_path = gen_dir / "manifest.json"
+    try:
+        with manifest_path.open("w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log_warn(f"manifest.json 保存失敗: {e}")
+
+
+def load_manifest(gen_dir: Path) -> Dict | None:
+    """manifest.json を読み込み."""
+    manifest_path = gen_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        with manifest_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def list_generations() -> List[Tuple[str, Path, Dict | None]]:
+    """すべての世代をリストアップ（世代名, パス, manifest）."""
+    generations = []
+    for item in INDEX_DIR.iterdir():
+        if item.is_dir() and item.name.startswith("gen_"):
+            gen_name = item.name[4:]  # "gen_" を除く
+            manifest = load_manifest(item)
+            generations.append((gen_name, item, manifest))
+
+    # タイムスタンプでソート（新しい順）
+    generations.sort(key=lambda x: x[2].get("created_timestamp", 0) if x[2] else 0, reverse=True)
+    return generations
+
+
+def cleanup_old_generations(current_gen_name: str | None, grace_sec: int = 300) -> None:
+    """古い世代を削除（保持ポリシーに従う）."""
+    import shutil
+
+    keep_generations = env_int("INDEX_KEEP_GENERATIONS", 3)
+    keep_days = env_int("INDEX_KEEP_DAYS", 0)
+    max_bytes = env_int("INDEX_MAX_BYTES", 0)
+
+    generations = list_generations()
+
+    # 現在の世代を特定
+    current_gen_dir = None
+    if current_gen_name:
+        current_gen_dir = get_generation_dir(current_gen_name, build=False)
+
+    # 削除候補リスト
+    to_delete = []
+    total_bytes = 0
+
+    for i, (gen_name, gen_dir, manifest) in enumerate(generations):
+        # 現在の世代は絶対に削除しない
+        if current_gen_dir and gen_dir == current_gen_dir:
+            continue
+
+        # 猶予期間内は削除しない
+        if manifest and grace_sec > 0:
+            created_timestamp = manifest.get("created_timestamp", 0)
+            age_sec = time.time() - created_timestamp
+            if age_sec < grace_sec:
+                continue
+
+        # 世代数チェック（current を除外した上で保持数を確認）
+        # current を除いた index を計算
+        non_current_index = i
+        if current_gen_dir:
+            # current より前の世代の数を数える
+            non_current_index = sum(1 for j in range(i) if generations[j][1] != current_gen_dir)
+
+        if keep_generations > 0 and non_current_index >= keep_generations:
+            to_delete.append((gen_name, gen_dir, "世代数超過"))
+            continue
+
+        # 日数チェック
+        if manifest and keep_days > 0:
+            created_timestamp = manifest.get("created_timestamp", 0)
+            age_days = (time.time() - created_timestamp) / 86400
+            if age_days > keep_days:
+                to_delete.append((gen_name, gen_dir, "保持期限切れ"))
+                continue
+
+        # 容量計算
+        if max_bytes > 0:
+            try:
+                dir_bytes = sum(
+                    f.stat().st_size for f in gen_dir.rglob("*") if f.is_file()
+                )
+                total_bytes += dir_bytes
+            except Exception:
+                pass
+
+    # 容量超過チェック（古い順に削除）
+    if max_bytes > 0 and total_bytes > max_bytes:
+        for gen_name, gen_dir, manifest in reversed(generations):
+            if current_gen_dir and gen_dir == current_gen_dir:
+                continue
+            if (gen_name, gen_dir, None) not in [(d[0], d[1], None) for d in to_delete]:
+                try:
+                    dir_bytes = sum(
+                        f.stat().st_size for f in gen_dir.rglob("*") if f.is_file()
+                    )
+                    total_bytes -= dir_bytes
+                    to_delete.append((gen_name, gen_dir, "容量超過"))
+                    if total_bytes <= max_bytes:
+                        break
+                except Exception:
+                    pass
+
+    # 削除実行
+    for gen_name, gen_dir, reason in to_delete:
+        try:
+            shutil.rmtree(gen_dir)
+            log_info(f"世代削除: gen_{gen_name} 理由={reason}")
+        except Exception as e:
+            log_warn(f"世代削除失敗: gen_{gen_name} エラー={e}")
+
+
+def index_path_for(folder_path: str, gen_dir: Path | None = None) -> Path:
+    """インデックスファイルのパスを取得（世代ディレクトリ対応）."""
     hashed = hashlib.sha256(folder_path.encode("utf-8")).hexdigest()[:12]
-    return INDEX_DIR / f"index_{hashed}_{INDEX_VERSION}.pkl.gz"
+    if gen_dir is None:
+        gen_dir = get_current_generation_dir()
+    return gen_dir / f"index_{hashed}_{INDEX_VERSION}.pkl.gz"
 
 
-def load_index_from_disk(folder_path: str) -> Dict[str, Dict]:
-    idx_path = index_path_for(folder_path)
+def load_index_from_disk(folder_path: str, gen_dir: Path | None = None) -> Dict[str, Dict]:
+    """インデックスをディスクから読み込み（世代ディレクトリ対応）."""
+    idx_path = index_path_for(folder_path, gen_dir)
     if not idx_path.exists():
         return {}
     try:
@@ -1165,8 +1394,12 @@ def load_index_from_disk(folder_path: str) -> Dict[str, Dict]:
         return {}
 
 
-def save_index_to_disk(folder_path: str, cache: Dict[str, Dict]):
-    idx_path = index_path_for(folder_path)
+def save_index_to_disk(folder_path: str, cache: Dict[str, Dict], gen_dir: Path | None = None):
+    """インデックスをディスクに保存（世代ディレクトリ対応）."""
+    idx_path = index_path_for(folder_path, gen_dir)
+    # gen_dir が指定されている場合、ディレクトリを作成
+    if gen_dir is not None:
+        gen_dir.mkdir(parents=True, exist_ok=True)
     try:
         with gzip.open(idx_path, "wb") as f:
             pickle.dump(cache, f)
@@ -1184,10 +1417,10 @@ def scan_files(folder: str) -> List[Path]:
     return files
 
 
-def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None = None) -> Tuple[Dict[str, Dict], Dict, Dict[str, str]]:
+def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None = None, gen_dir: Path | None = None) -> Tuple[Dict[str, Dict], Dict, Dict[str, str]]:
     """インデックス作成（差分更新 & 高精度固定）."""
     start_time = time.time()
-    existing_cache = load_index_from_disk(folder)
+    existing_cache = load_index_from_disk(folder, gen_dir)
     failures = {k: v for k, v in (previous_failures or {}).items()}
     all_files = scan_files(folder)
     if not all_files and existing_cache:
@@ -1266,7 +1499,7 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
 
     valid_cache.update(updated_data)
     failures = {k: v for k, v in failures.items() if k not in valid_cache}
-    save_index_to_disk(folder, valid_cache)
+    save_index_to_disk(folder, valid_cache, gen_dir)
 
     stats = {
         "total_files": len(all_files),
@@ -1592,31 +1825,91 @@ def init_folder_states():
 
 
 def build_all_indexes():
-    log_info("起動時インデックス構築開始")
+    """インデックス構築（世代ディレクトリ方式）."""
+    import shutil
+
+    log_info("インデックス構築開始")
+
+    # 新しい世代を作成
+    gen_name = create_generation_uuid()
+    build_gen_dir = get_generation_dir(gen_name, build=True)
+    build_gen_dir.mkdir(parents=True, exist_ok=True)
+
+    log_info(f"世代ディレクトリ構築: gen_{gen_name}")
+
+    # 各フォルダのインデックスを構築
+    temp_indexes = {}
+    temp_failures = {}
+
     for folder_id, meta in folder_states.items():
         path = meta["path"]
         if not os.path.isdir(path):
             meta["ready"] = False
             meta["message"] = f"フォルダが見つかりません: {path}"
             continue
+
         meta["message"] = "インデックス構築中..."
         log_info(f"フォルダ処理開始: {path}")
+
+        # 既存の世代から前回のインデックスを読み込み（差分更新用）
+        prev_gen_dir = get_current_generation_dir()
+        prev_cache = load_index_from_disk(path, prev_gen_dir)
+
         prev_failures = index_failures.get(folder_id, {})
-        cache, stats, failures = build_index_for_folder(path, prev_failures)
-        memory_indexes[folder_id] = cache
-        memory_pages[folder_id] = build_memory_pages(
-            folder_id, meta["name"], cache
-        )
-        index_failures[folder_id] = failures
+        cache, stats, failures = build_index_for_folder(path, prev_failures, build_gen_dir)
+
+        temp_indexes[folder_id] = cache
+        temp_failures[folder_id] = failures
+
         if os.getenv("SEARCH_DEBUG", "").strip().lower() in {"1", "true", "yes"}:
-            log_info(
-                f"ページ数: {path} files={len(cache)} pages={len(memory_pages[folder_id])}"
-            )
-        meta["ready"] = True
-        meta["message"] = "準備完了"
+            log_info(f"インデックス構築: {path} files={len(cache)}")
+
         meta["stats"] = stats
         log_info(f"フォルダ処理完了: {path}")
-    log_info("起動時インデックス構築完了")
+
+    # manifest.json を作成
+    manifest = create_manifest(gen_name, build_gen_dir, folder_states)
+    save_manifest(build_gen_dir, manifest)
+    log_info(f"manifest.json 作成完了: gen_{gen_name}")
+
+    # ビルドディレクトリを本番ディレクトリに移動（原子的）
+    final_gen_dir = get_generation_dir(gen_name, build=False)
+    try:
+        build_gen_dir.replace(final_gen_dir)
+        log_info(f"世代ディレクトリ移動完了: gen_{gen_name}")
+    except Exception as e:
+        log_warn(f"世代ディレクトリ移動失敗: {e}")
+        # ビルドディレクトリを削除
+        if build_gen_dir.exists():
+            shutil.rmtree(build_gen_dir)
+        raise
+
+    # currentポインターを更新（原子的）
+    old_gen_name = get_current_generation_pointer()
+    set_current_generation_pointer(gen_name)
+    log_info(f"currentポインター更新: {old_gen_name or 'なし'} → gen_{gen_name}")
+
+    # メモリ内のインデックスとページを更新
+    for folder_id, cache in temp_indexes.items():
+        memory_indexes[folder_id] = cache
+        memory_pages[folder_id] = build_memory_pages(
+            folder_id, folder_states[folder_id]["name"], cache
+        )
+        index_failures[folder_id] = temp_failures[folder_id]
+        folder_states[folder_id]["ready"] = True
+        folder_states[folder_id]["message"] = "準備完了"
+
+        if os.getenv("SEARCH_DEBUG", "").strip().lower() in {"1", "true", "yes"}:
+            log_info(
+                f"ページ数: {folder_states[folder_id]['path']} "
+                f"files={len(cache)} pages={len(memory_pages[folder_id])}"
+            )
+
+    # 古い世代をクリーンアップ
+    grace_sec = env_int("INDEX_CLEANUP_GRACE_SEC", 300)
+    cleanup_old_generations(gen_name, grace_sec)
+
+    log_info("インデックス構築完了")
 
 
 def install_asyncio_exception_filter():

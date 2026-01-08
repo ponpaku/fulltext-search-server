@@ -4,6 +4,17 @@ System Version: 1.1.0
 
 ## 1.1.0
 
+- 2026-01-08: 機能追加: 世代ディレクトリ方式のインデックス再構築を実装（無停止運用対応）。
+  - `indexes/gen_<uuid>/` に世代ごとのインデックスを保存
+  - `indexes/.build/gen_<uuid>/` で新世代を構築後、原子的に切替
+  - `indexes/current.txt` で現在の世代を管理
+  - `manifest.json` で世代メタデータを記録
+- 2026-01-08: 機能追加: インデックス世代の保持ポリシーを実装（無限増殖防止）。
+  - `INDEX_KEEP_GENERATIONS`: 保持する世代数（デフォルト: 3）
+  - `INDEX_KEEP_DAYS`: 保持する日数（0=無制限）
+  - `INDEX_MAX_BYTES`: 最大容量（0=無制限）
+  - `INDEX_CLEANUP_GRACE_SEC`: 切替後の猶予期間（デフォルト: 300秒）
+- 2026-01-08: ドキュメント: README.md にロールバック手順を追加。
 - 2026-01-08: リファクタリング: マジックナンバーを定数として抽出（検索表示、パフォーマンス、キャッシュ関連）。
 - 2026-01-08: リファクタリング: 重複した検索ロジック関数を共通ヘルパー関数に統合（`_find_raw_hit_position`, `_build_search_result`）。
 - 2026-01-08: リファクタリング: `/api/search` エンドポイントのキャッシュ取得ロジックをヘルパー関数に抽出（`_try_get_memory_cache`, `_try_get_fixed_cache`）。
