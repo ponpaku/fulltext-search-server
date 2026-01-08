@@ -21,8 +21,8 @@ from typing import Dict, List, Tuple
 
 from dotenv import load_dotenv
 
-SYSTEM_VERSION = "1.0.0"
-# File Version: 1.0.0
+SYSTEM_VERSION = "1.1.0"
+# File Version: 1.1.0
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -542,6 +542,69 @@ def extract_text_from_file_with_reason(file_path: str) -> Tuple[Dict[int, str], 
     return {}, reason or "抽出結果が空"
 
 
+def _find_raw_hit_position(
+    raw_for_positions: str,
+    raw_keywords: List[str],
+    space_mode: str,
+) -> int:
+    """生テキスト内でキーワードの位置を検索する共通ヘルパー."""
+    raw_hit_pos = -1
+    raw_lower = raw_for_positions.lower()
+    for kw in raw_keywords:
+        if not kw:
+            continue
+        raw_idx = raw_lower.find(kw.lower())
+        if raw_idx != -1:
+            raw_hit_pos = raw_idx
+            break
+
+    if raw_hit_pos == -1 and space_mode != "none":
+        for kw in raw_keywords:
+            if not kw:
+                continue
+            flex = build_flexible_keyword_regex(kw)
+            if not flex:
+                continue
+            match = flex.search(raw_for_positions)
+            if match:
+                raw_hit_pos = match.start()
+                break
+
+    return raw_hit_pos
+
+
+def _build_search_result(
+    entry: Dict,
+    raw_text: str,
+    raw_for_positions: str,
+    raw_hit_pos: int,
+) -> Dict:
+    """検索結果のスニペットと詳細を生成する共通ヘルパー."""
+    snippet_start = max(0, raw_hit_pos - SNIPPET_PREFIX_CHARS) if raw_hit_pos != -1 else 0
+    snippet_end = min(len(raw_for_positions), snippet_start + SNIPPET_TOTAL_LENGTH)
+    snippet_raw = raw_for_positions[snippet_start:snippet_end]
+    snippet = f"...{normalize_snippet_text(snippet_raw)}..."
+
+    detail_pos = raw_hit_pos if raw_hit_pos != -1 else 0
+    detail_start = max(0, detail_pos - DETAIL_CONTEXT_PREFIX)
+    detail_end = min(len(raw_text), detail_start + DETAIL_WINDOW_SIZE)
+    detail_text_raw = raw_text[detail_start:detail_end]
+    detail_text = normalize_detail_text(detail_text_raw)
+
+    return {
+        "file": entry["file"],
+        "path": entry["path"],
+        "displayPath": entry.get(
+            "displayPath", display_path_for_path(entry["path"], host_aliases)
+        ),
+        "page": entry["page"],
+        "context": snippet,
+        "detail": detail_text,
+        "folderId": entry["folderId"],
+        "folderName": entry["folderName"],
+    }
+
+
 def search_text_logic(
     entry: Dict,
     norm_keyword_groups: List[List[str]],
@@ -631,54 +694,8 @@ def search_text_logic(
     if not is_match:
         return []
 
-    raw_hit_pos = -1
-    raw_lower = raw_for_positions.lower()
-    for kw in raw_keywords:
-        if not kw:
-            continue
-        raw_idx = raw_lower.find(kw.lower())
-        if raw_idx != -1:
-            raw_hit_pos = raw_idx
-            break
-
-    if raw_hit_pos == -1 and space_mode != "none":
-        for kw in raw_keywords:
-            if not kw:
-                continue
-            flex = build_flexible_keyword_regex(kw)
-            if not flex:
-                continue
-            match = flex.search(raw_for_positions)
-            if match:
-                raw_hit_pos = match.start()
-                break
-
-    snippet_start = max(0, raw_hit_pos - SNIPPET_PREFIX_CHARS) if raw_hit_pos != -1 else 0
-    snippet_end = min(len(raw_for_positions), snippet_start + SNIPPET_TOTAL_LENGTH)
-    snippet_raw = raw_for_positions[snippet_start:snippet_end]
-    snippet = f"...{normalize_snippet_text(snippet_raw)}..."
-    detail_pos = raw_hit_pos if raw_hit_pos != -1 else 0
-    detail_start = max(0, detail_pos - DETAIL_CONTEXT_PREFIX)
-    detail_end = min(len(raw_text), detail_start + DETAIL_WINDOW_SIZE)
-    detail_text_raw = raw_text[detail_start:detail_end]
-    # 「\n　」は残し、それ以外の改行はスペース化したうえで圧縮
-    detail_text = normalize_detail_text(detail_text_raw)
-    page_display = entry["page"]
-    results.append(
-        {
-            "file": entry["file"],
-            "path": entry["path"],
-            "displayPath": entry.get(
-                "displayPath", display_path_for_path(entry["path"], host_aliases)
-            ),
-            "page": page_display,
-            "context": snippet,
-            "detail": detail_text,
-            "folderId": entry["folderId"],
-            "folderName": entry["folderName"],
-        }
-    )
-    return results
+    raw_hit_pos = _find_raw_hit_position(raw_for_positions, raw_keywords, space_mode)
+    return [_build_search_result(entry, raw_text, raw_for_positions, raw_hit_pos)]
 
 
 def search_entries_chunk(
@@ -808,53 +825,8 @@ def search_text_logic_shared(
     raw_text = raw_bytes.decode("utf-8", errors="ignore")
     raw_for_positions = normalize_invisible_separators(raw_text)
 
-    raw_hit_pos = -1
-    raw_lower = raw_for_positions.lower()
-    for kw in raw_keywords:
-        if not kw:
-            continue
-        raw_idx = raw_lower.find(kw.lower())
-        if raw_idx != -1:
-            raw_hit_pos = raw_idx
-            break
-
-    if raw_hit_pos == -1 and space_mode != "none":
-        for kw in raw_keywords:
-            if not kw:
-                continue
-            flex = build_flexible_keyword_regex(kw)
-            if not flex:
-                continue
-            match = flex.search(raw_for_positions)
-            if match:
-                raw_hit_pos = match.start()
-                break
-
-    snippet_start = max(0, raw_hit_pos - SNIPPET_PREFIX_CHARS) if raw_hit_pos != -1 else 0
-    snippet_end = min(len(raw_for_positions), snippet_start + SNIPPET_TOTAL_LENGTH)
-    snippet_raw = raw_for_positions[snippet_start:snippet_end]
-    snippet = f"...{normalize_snippet_text(snippet_raw)}..."
-    detail_pos = raw_hit_pos if raw_hit_pos != -1 else 0
-    detail_start = max(0, detail_pos - DETAIL_CONTEXT_PREFIX)
-    detail_end = min(len(raw_text), detail_start + DETAIL_WINDOW_SIZE)
-    detail_text_raw = raw_text[detail_start:detail_end]
-    detail_text = normalize_detail_text(detail_text_raw)
-    page_display = entry["page"]
-    results.append(
-        {
-            "file": entry["file"],
-            "path": entry["path"],
-            "displayPath": entry.get(
-                "displayPath", display_path_for_path(entry["path"], host_aliases)
-            ),
-            "page": page_display,
-            "context": snippet,
-            "detail": detail_text,
-            "folderId": entry["folderId"],
-            "folderName": entry["folderName"],
-        }
-    )
-    return results
+    raw_hit_pos = _find_raw_hit_position(raw_for_positions, raw_keywords, space_mode)
+    return [_build_search_result(entry, raw_text, raw_for_positions, raw_hit_pos)]
 
 
 def search_entries_chunk_shared(
@@ -2352,6 +2324,80 @@ async def get_folder_files(folder_id: str, scope: str = "indexed"):
     return {"folder": folder_id, "name": meta["name"], "files": files, "scope": scope}
 
 
+def _try_get_memory_cache(
+    cache_key: str,
+    target_ids: List[str],
+    req_query: str,
+    params: "SearchParams",
+) -> Dict | None:
+    """メモリキャッシュから結果を取得。ヒットした場合は統計を更新して返す。"""
+    with cache_lock:
+        cached_payload = memory_cache.get(cache_key) if memory_cache else None
+    if cached_payload and payload_matches_folders(cached_payload, target_ids):
+        cached_payload = apply_folder_order(cached_payload, folder_order)
+        cached_bytes = estimate_payload_bytes(cached_payload)
+        cached_kb = cached_bytes / 1024
+        update_query_stats(
+            query_stats,
+            cache_key,
+            req_query,
+            params,
+            target_ids,
+            cached_payload.get("count", 0),
+            cached_kb,
+            None,
+            True,
+        )
+        maybe_flush_query_stats()
+        return cached_payload
+    elif cached_payload:
+        with cache_lock:
+            if memory_cache:
+                memory_cache.pop(cache_key)
+    return None
+
+
+def _try_get_fixed_cache(
+    cache_key: str,
+    target_ids: List[str],
+    req_query: str,
+    params: "SearchParams",
+) -> Dict | None:
+    """固定キャッシュから結果を取得。ヒットした場合はメモリキャッシュにも保存して返す。"""
+    with cache_lock:
+        fixed_entry = fixed_cache_index.get(cache_key)
+    if not fixed_entry:
+        return None
+    payload = read_fixed_cache_payload(fixed_entry)
+    if payload and payload_matches_folders(payload, target_ids):
+        payload = apply_folder_order(payload, folder_order)
+        cached_kb = fixed_entry.get("payload_kb")
+        if cached_kb is None:
+            cached_kb = estimate_payload_bytes(payload) / 1024
+        update_query_stats(
+            query_stats,
+            cache_key,
+            req_query,
+            params,
+            target_ids,
+            payload.get("count", 0),
+            cached_kb,
+            None,
+            True,
+        )
+        with cache_lock:
+            if memory_cache:
+                memory_cache.set(cache_key, payload, int(cached_kb * 1024))
+            touch_fixed_cache_entry(cache_key)
+        maybe_flush_fixed_cache_index()
+        maybe_flush_query_stats()
+        return payload
+    with cache_lock:
+        fixed_cache_index.pop(cache_key, None)
+        save_fixed_cache_index(fixed_cache_index)
+    return None
+
+
 @app.post("/api/search")
 async def search(req: SearchRequest):
     global rw_lock, search_semaphore, search_executor, search_execution_mode
@@ -2367,62 +2413,14 @@ async def search(req: SearchRequest):
 
             params = SearchParams(req.mode, req.range_limit, req.space_mode)
             cache_key = cache_key_for(req.query, params, target_ids)
-            cached_payload = None
-            cached_kb = None
-            with cache_lock:
-                cached_payload = memory_cache.get(cache_key) if memory_cache else None
-            if cached_payload and payload_matches_folders(cached_payload, target_ids):
-                cached_payload = apply_folder_order(cached_payload, folder_order)
-                cached_bytes = estimate_payload_bytes(cached_payload)
-                cached_kb = cached_bytes / 1024
-                update_query_stats(
-                    query_stats,
-                    cache_key,
-                    req.query,
-                    params,
-                    target_ids,
-                    cached_payload.get("count", 0),
-                    cached_kb,
-                    None,
-                    True,
-                )
-                maybe_flush_query_stats()
-                return cached_payload
-            elif cached_payload:
-                with cache_lock:
-                    if memory_cache:
-                        memory_cache.pop(cache_key)
 
-            with cache_lock:
-                fixed_entry = fixed_cache_index.get(cache_key)
-            if fixed_entry:
-                payload = read_fixed_cache_payload(fixed_entry)
-                if payload and payload_matches_folders(payload, target_ids):
-                    payload = apply_folder_order(payload, folder_order)
-                    cached_kb = fixed_entry.get("payload_kb")
-                    if cached_kb is None:
-                        cached_kb = estimate_payload_bytes(payload) / 1024
-                    update_query_stats(
-                        query_stats,
-                        cache_key,
-                        req.query,
-                        params,
-                        target_ids,
-                        payload.get("count", 0),
-                        cached_kb,
-                        None,
-                        True,
-                    )
-                    with cache_lock:
-                        if memory_cache:
-                            memory_cache.set(cache_key, payload, int(cached_kb * 1024))
-                        touch_fixed_cache_entry(cache_key)
-                    maybe_flush_fixed_cache_index()
-                    maybe_flush_query_stats()
-                    return payload
-                with cache_lock:
-                    fixed_cache_index.pop(cache_key, None)
-                    save_fixed_cache_index(fixed_cache_index)
+            # キャッシュからの取得を試行
+            cached_result = _try_get_memory_cache(cache_key, target_ids, req.query, params)
+            if cached_result:
+                return cached_result
+            cached_result = _try_get_fixed_cache(cache_key, target_ids, req.query, params)
+            if cached_result:
+                return cached_result
 
             keywords, norm_keyword_groups = build_query_groups(req.query, req.space_mode)
             raw_keywords = keywords
