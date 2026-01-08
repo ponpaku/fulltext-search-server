@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.0"
-# File Version: 1.2.4
+# File Version: 1.2.5
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -1294,7 +1294,20 @@ def list_generations() -> List[Tuple[str, Path, Dict | None]]:
             generations.append((gen_name, item, manifest))
 
     # タイムスタンプでソート（新しい順）
-    generations.sort(key=lambda x: x[2].get("created_timestamp", 0) if x[2] else 0, reverse=True)
+    # manifest がない場合は gen_name からタイムスタンプを抽出してフォールバック
+    def get_sort_key(item):
+        gen_name, gen_dir, manifest = item
+        if manifest and "created_timestamp" in manifest:
+            return manifest["created_timestamp"]
+        # manifest がない場合、gen_name からタイムスタンプを抽出
+        # gen_name format: "timestamp_randomhex"
+        try:
+            timestamp_str = gen_name.split("_")[0]
+            return int(timestamp_str)
+        except (ValueError, IndexError):
+            return 0
+
+    generations.sort(key=get_sort_key, reverse=True)
     return generations
 
 
