@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.0"
-# File Version: 1.3.0
+# File Version: 1.3.1
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -1442,18 +1442,29 @@ def load_file_state(folder_path: str, gen_dir: Path | None = None) -> Dict[str, 
     state_path = file_state_path_for(folder_path, gen_dir)
     if not state_path.exists():
         return {}
+    states = {}
     try:
-        states = {}
         with open(state_path, "r", encoding="utf-8") as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
-                entry = json.loads(line)
-                states[entry["path"]] = entry
-        return states
-    except Exception:
-        return {}
+                try:
+                    entry = json.loads(line)
+                    # 必須キー "path" の確認
+                    if "path" not in entry:
+                        log_warn(f"file_state.jsonl 読み込み警告: 行{line_num} に 'path' キーがありません")
+                        continue
+                    states[entry["path"]] = entry
+                except json.JSONDecodeError:
+                    log_warn(f"file_state.jsonl 読み込み警告: 行{line_num} の JSON パースに失敗しました")
+                    continue
+                except Exception as e:
+                    log_warn(f"file_state.jsonl 読み込み警告: 行{line_num} の処理中にエラー ({e})")
+                    continue
+    except Exception as e:
+        log_warn(f"file_state.jsonl 読み込みエラー: {state_path} ({e})")
+    return states
 
 
 def save_file_state(folder_path: str, states: Dict[str, Dict], gen_dir: Path | None = None):
@@ -1799,8 +1810,15 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
     diff_mode = os.getenv("DIFF_MODE", "stat").strip().lower()
     if diff_mode not in {"stat", "stat+fastfp", "stat+fastfp+fullhash"}:
         diff_mode = "stat"
-    fast_fp_bytes = int(os.getenv("FAST_FP_BYTES", "65536").strip())
+    try:
+        fast_fp_bytes = int(os.getenv("FAST_FP_BYTES", "65536").strip())
+        if fast_fp_bytes <= 0:
+            fast_fp_bytes = 65536
+    except (ValueError, AttributeError):
+        fast_fp_bytes = 65536
     full_hash_algo = os.getenv("FULL_HASH_ALGO", "sha256").strip()
+    if not full_hash_algo:
+        full_hash_algo = "sha256"
 
     # 差分更新のため、前回の世代から既存キャッシュとファイル状態を読み込む
     if prev_gen_dir is not None and prev_gen_dir.exists():
