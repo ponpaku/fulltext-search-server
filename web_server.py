@@ -55,6 +55,20 @@ CACHE_DIR.mkdir(exist_ok=True)
 FIXED_CACHE_INDEX = CACHE_DIR / "fixed_cache_index.json"
 QUERY_STATS_PATH = CACHE_DIR / "query_stats.json"
 
+# --- 検索表示定数 ---
+SNIPPET_PREFIX_CHARS = 40
+SNIPPET_TOTAL_LENGTH = 160
+DETAIL_CONTEXT_PREFIX = 500
+DETAIL_WINDOW_SIZE = 2000
+
+# --- 検索パフォーマンス定数 ---
+SEARCH_ENTRIES_CHUNK_THRESHOLD = 2000
+
+# --- キャッシュデフォルト定数 ---
+DEFAULT_CACHE_MAX_ENTRIES = 200
+DEFAULT_CACHE_MAX_MB = 200
+DEFAULT_CACHE_MAX_RESULT_KB = 2000
+
 
 # --- ユーティリティ ---
 CID_PATTERN = re.compile(r"\(cid:\d+\)", re.IGNORECASE)
@@ -639,15 +653,13 @@ def search_text_logic(
                 raw_hit_pos = match.start()
                 break
 
-    snippet_start = max(0, raw_hit_pos - 40) if raw_hit_pos != -1 else 0
-    snippet_end = min(len(raw_for_positions), snippet_start + 160)
+    snippet_start = max(0, raw_hit_pos - SNIPPET_PREFIX_CHARS) if raw_hit_pos != -1 else 0
+    snippet_end = min(len(raw_for_positions), snippet_start + SNIPPET_TOTAL_LENGTH)
     snippet_raw = raw_for_positions[snippet_start:snippet_end]
     snippet = f"...{normalize_snippet_text(snippet_raw)}..."
-    # 詳細表示用に広めの文脈を収集（クリック時用）
     detail_pos = raw_hit_pos if raw_hit_pos != -1 else 0
-    detail_window = 2000  # クリック時に十分読める長さを返す
-    detail_start = max(0, detail_pos - 500)
-    detail_end = min(len(raw_text), detail_start + detail_window)
+    detail_start = max(0, detail_pos - DETAIL_CONTEXT_PREFIX)
+    detail_end = min(len(raw_text), detail_start + DETAIL_WINDOW_SIZE)
     detail_text_raw = raw_text[detail_start:detail_end]
     # 「\n　」は残し、それ以外の改行はスペース化したうえで圧縮
     detail_text = normalize_detail_text(detail_text_raw)
@@ -818,14 +830,13 @@ def search_text_logic_shared(
                 raw_hit_pos = match.start()
                 break
 
-    snippet_start = max(0, raw_hit_pos - 40) if raw_hit_pos != -1 else 0
-    snippet_end = min(len(raw_for_positions), snippet_start + 160)
+    snippet_start = max(0, raw_hit_pos - SNIPPET_PREFIX_CHARS) if raw_hit_pos != -1 else 0
+    snippet_end = min(len(raw_for_positions), snippet_start + SNIPPET_TOTAL_LENGTH)
     snippet_raw = raw_for_positions[snippet_start:snippet_end]
     snippet = f"...{normalize_snippet_text(snippet_raw)}..."
     detail_pos = raw_hit_pos if raw_hit_pos != -1 else 0
-    detail_window = 2000
-    detail_start = max(0, detail_pos - 500)
-    detail_end = min(len(raw_text), detail_start + detail_window)
+    detail_start = max(0, detail_pos - DETAIL_CONTEXT_PREFIX)
+    detail_end = min(len(raw_text), detail_start + DETAIL_WINDOW_SIZE)
     detail_text_raw = raw_text[detail_start:detail_end]
     detail_text = normalize_detail_text(detail_text_raw)
     page_display = entry["page"]
@@ -895,7 +906,7 @@ def perform_search(
             )
         folder_results: List[Dict] = []
         entries_iter = entries
-        if len(entries_iter) >= 2000:
+        if len(entries_iter) >= SEARCH_ENTRIES_CHUNK_THRESHOLD:
             chunk_workers = max(1, worker_count)
             chunk_size = max(1, (len(entries_iter) + chunk_workers - 1) // chunk_workers)
             chunks = [
@@ -1019,7 +1030,7 @@ def perform_search_process(
                 entries = []
         folder_results: List[Dict] = []
         entries_iter = entries
-        if len(entries_iter) >= 2000:
+        if len(entries_iter) >= SEARCH_ENTRIES_CHUNK_THRESHOLD:
             chunk_workers = max(1, worker_count)
             chunk_size = max(1, (len(entries_iter) + chunk_workers - 1) // chunk_workers)
             chunks = [
@@ -1086,7 +1097,7 @@ def perform_search_process_shared(
             return []
         folder_results: List[Dict] = []
         entries_iter = entries
-        if len(entries_iter) >= 2000:
+        if len(entries_iter) >= SEARCH_ENTRIES_CHUNK_THRESHOLD:
             chunk_workers = max(1, worker_count)
             chunk_size = max(1, (len(entries_iter) + chunk_workers - 1) // chunk_workers)
             chunks = [
@@ -2225,7 +2236,11 @@ async def startup_event():
     install_asyncio_exception_filter()
     global search_semaphore, rw_lock, search_worker_count, search_executor, search_execution_mode, search_concurrency, fixed_cache_index, memory_cache, query_stats, query_stats_dirty, query_stats_last_saved, folder_order
     rw_lock = AsyncRWLock()
-    memory_cache = MemoryCache(200, 200 * 1024 * 1024, 2000)
+    memory_cache = MemoryCache(
+        DEFAULT_CACHE_MAX_ENTRIES,
+        DEFAULT_CACHE_MAX_MB * 1024 * 1024,
+        DEFAULT_CACHE_MAX_RESULT_KB,
+    )
     init_cache_settings(memory_cache)
     fixed_cache_index = load_fixed_cache_index()
     prune_cache_dir(set(fixed_cache_index.keys()))
