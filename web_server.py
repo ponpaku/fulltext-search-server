@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.0"
-# File Version: 1.2.2
+# File Version: 1.2.3
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -1337,7 +1337,7 @@ def cleanup_old_generations(current_gen_name: str | None, grace_sec: int = 300) 
                 if age_days > keep_days:
                     to_delete.append((gen_name, gen_dir, "保持期限切れ"))
 
-    # 容量チェック（現在の世代を含む全体のディスク使用量を計算）
+    # 容量チェック（現在の世代と猶予期間中の世代を含む全体のディスク使用量を計算）
     if max_bytes > 0:
         total_bytes = 0
         keep_set = set((gen_name, gen_dir) for gen_name, gen_dir, _ in to_delete)
@@ -1352,10 +1352,15 @@ def cleanup_old_generations(current_gen_name: str | None, grace_sec: int = 300) 
             except Exception:
                 pass
 
-        # 保持する世代（削除対象外）の容量を計算
-        for gen_name, gen_dir, manifest in eligible_generations:
+        # すべての世代（猶予期間中も含む）のサイズを計算
+        # 削除対象に既に含まれているものは除外
+        for gen_name, gen_dir, manifest in all_generations:
+            # 現在の世代はスキップ（既に計算済み）
+            if current_gen_dir and gen_dir == current_gen_dir:
+                continue
+            # 削除対象のものはスキップ
             if (gen_name, gen_dir) in keep_set:
-                continue  # 既に削除対象
+                continue
             try:
                 dir_bytes = sum(
                     f.stat().st_size for f in gen_dir.rglob("*") if f.is_file()
@@ -1364,7 +1369,7 @@ def cleanup_old_generations(current_gen_name: str | None, grace_sec: int = 300) 
             except Exception:
                 pass
 
-        # 容量超過の場合、古い順に削除（現在の世代は除外）
+        # 容量超過の場合、古い順に削除（猶予期間中と現在の世代は除外）
         if total_bytes > max_bytes:
             for gen_name, gen_dir, manifest in reversed(eligible_generations):
                 if (gen_name, gen_dir) in keep_set:
