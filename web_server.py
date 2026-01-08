@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.0"
-# File Version: 1.3.1
+# File Version: 1.3.2
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -1864,9 +1864,8 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
     current_map = {str(f): f for f in all_files}
     failures = {k: v for k, v in failures.items() if k in current_map}
 
-    valid_cache = {
-        path: meta for path, meta in existing_cache.items() if path in current_map
-    }
+    # valid_cache は既存のインデックスから開始（削除検知のため、まだフィルタしない）
+    valid_cache = dict(existing_cache)
 
     # 削除検知の安全策: 削除候補の処理
     current_file_states: Dict[str, Dict] = {}
@@ -1878,9 +1877,9 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
                 # 2回目の不在 → 削除として扱う（インデックスから除外）
                 if path_str in valid_cache:
                     del valid_cache[path_str]
-                log_info(f"削除検知: {path_str}")
+                    log_info(f"削除検知: {path_str}")
             else:
-                # 1回目の不在 → 削除候補としてマーク
+                # 1回目の不在 → 削除候補としてマーク（インデックスには残す）
                 prev_state["deletion_candidate_since"] = time.time()
                 current_file_states[path_str] = prev_state
                 log_info(f"削除候補: {path_str}")
