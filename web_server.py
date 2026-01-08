@@ -613,7 +613,6 @@ def search_text_logic(
     range_limit: int,
     space_mode: str,
 ) -> List[Dict]:
-    results = []
     if not norm_keyword_groups:
         return []
 
@@ -776,7 +775,6 @@ def search_text_logic_shared(
     range_limit: int,
     space_mode: str,
 ) -> List[Dict]:
-    results = []
     if not norm_keyword_groups_bytes:
         return []
 
