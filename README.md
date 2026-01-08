@@ -1,7 +1,7 @@
 # Full-Search-PDFs
 
 System Version: 1.1.0
-README File Version: 1.1.0
+README File Version: 1.1.1
 
 ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。
 UI は `static/` 配下で提供されます。
@@ -115,6 +115,14 @@ REBUILD_SCHEDULE="03:00"
 - 完了後に `indexes/gen_<uuid>/` へ移動し、`current.txt` を更新
 - 古い世代は保持ポリシーに従って自動削除
 - 各世代に `manifest.json` を配置（メタデータ）
+
+### 保持ポリシーの詳細
+- `INDEX_KEEP_GENERATIONS`: 保持する世代数（現在の世代を除く）
+- `INDEX_KEEP_DAYS`: 作成日からの保持期間（日数、0=無制限）
+- `INDEX_MAX_BYTES`: **全世代の合計ディスク使用量の上限**（現在の世代を含む、0=無制限）
+  - 超過した場合、古い世代から順に削除される
+  - 現在の世代は削除されないため、現在の世代だけで上限を超える場合は削除されない
+- `INDEX_CLEANUP_GRACE_SEC`: 世代切替後の猶予期間（秒、デフォルト: 300）
 
 ### ロールバック手順
 問題が発生した場合、手動で前の世代に戻すことができます：
