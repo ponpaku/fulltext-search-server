@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.0"
-# File Version: 1.2.3
+# File Version: 1.2.4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -1197,12 +1197,23 @@ def get_generation_dir(gen_name: str | None = None, build: bool = False) -> Path
 
 
 def get_current_generation_dir() -> Path:
-    """現在の世代ディレクトリを取得（存在しない場合は INDEX_DIR を返す）."""
+    """現在の世代ディレクトリを取得（current.txt 欠落時は最新世代を自動選択）."""
     gen_name = get_current_generation_pointer()
     if gen_name:
         gen_dir = get_generation_dir(gen_name, build=False)
         if gen_dir.exists():
             return gen_dir
+
+    # current.txt がない場合、最新の世代を自動選択
+    generations = list_generations()
+    if generations:
+        latest_gen_name, latest_gen_dir, latest_manifest = generations[0]  # 最新（ソート済み）
+        log_warn(f"current.txt が見つからないため、最新世代を使用: gen_{latest_gen_name}")
+        # current.txt を復旧
+        set_current_generation_pointer(latest_gen_name)
+        return latest_gen_dir
+
+    # 世代ディレクトリが一つもない場合のみ INDEX_DIR にフォールバック
     return INDEX_DIR
 
 
