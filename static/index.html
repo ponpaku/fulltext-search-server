@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <!-- System Version: 1.1.1 | File Version: 1.1.0 -->
+  <!-- System Version: 1.1.1 | File Version: 1.1.5 -->
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>フォルダ内テキスト検索</title>
@@ -153,6 +153,12 @@
             <span class="result-count" id="resultCount">0 件</span>
           </div>
           <div style="display: flex; gap: 8px; align-items: center;">
+            <button type="button" class="chip-btn" id="filterBtn" title="結果内フィルタ">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 4h18M6 12h12M10 20h4"/>
+              </svg>
+              絞り込み
+            </button>
             <button type="button" class="chip-btn" id="exportBtn" title="エクスポート" style="display: none;">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -167,12 +173,27 @@
             </div>
           </div>
         </div>
-        <div id="facetsPanel" class="facets-panel" style="display: none;">
-          <div class="facets-header">
-            <h3>絞り込み</h3>
-            <button type="button" class="text-btn" id="closeFacets">閉じる</button>
+        <div id="filterPanel" class="filter-panel" style="display: none;">
+          <div class="filter-header">
+            <h3>結果内フィルタ</h3>
+            <button type="button" class="text-btn" id="closeFilter">閉じる</button>
           </div>
-          <div class="facets-content" id="facetsContent"></div>
+          <div class="filter-content">
+            <div class="filter-grid">
+              <div class="filter-group">
+                <div class="filter-title">フォルダ</div>
+                <div class="filter-list" id="filterFolders"></div>
+              </div>
+              <div class="filter-group">
+                <div class="filter-title">ファイル形式</div>
+                <div class="filter-list" id="filterExtensions"></div>
+              </div>
+            </div>
+          </div>
+          <div class="filter-actions">
+            <button type="button" class="btn btn-secondary" id="clearFilter">クリア</button>
+            <button type="button" class="btn btn-primary" id="applyFilter">適用</button>
+          </div>
         </div>
         <div class="results-container" id="results">
           <div class="empty-state">

@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
  * System Version: 1.1.1
- * File Version: 1.1.0
+ * File Version: 1.1.8
  */
 
 const state = {
@@ -11,6 +11,7 @@ const state = {
   keywords: [],
   viewMode: 'hit',
   results: [],
+  filteredResults: null,
   folderListOpen: true,
   isSearching: false,
   spaceMode: 'none',
@@ -23,8 +24,14 @@ const state = {
   queryHistory: [],
   historyModalOpen: false,
   currentIndexUuid: null,
-  facets: null,
-  resultSetId: null,
+  filter: {
+    folders: new Set(),
+    extensions: new Set(),
+  },
+  filterOptions: {
+    folders: [],
+    extensions: [],
+  },
 };
 
 // DOM Elements
@@ -58,9 +65,13 @@ const historyModalClose = $('historyModalClose');
 const historyListContent = $('historyListContent');
 const clearHistoryBtn = $('clearHistoryBtn');
 const exportBtn = $('exportBtn');
-const facetsPanel = $('facetsPanel');
-const facetsContent = $('facetsContent');
-const closeFacets = $('closeFacets');
+const filterBtn = $('filterBtn');
+const filterPanel = $('filterPanel');
+const filterFoldersEl = $('filterFolders');
+const filterExtensionsEl = $('filterExtensions');
+const applyFilterBtn = $('applyFilter');
+const clearFilterBtn = $('clearFilter');
+const closeFilterBtn = $('closeFilter');
 
 // ═══════════════════════════════════════════════════════════════
 // CLIPBOARD PERMISSION
@@ -842,12 +853,17 @@ const resetRenderState = () => {
   state.isRenderingBatch = false;
 };
 
+const getDisplayResults = () => (
+  state.filteredResults ? state.filteredResults : state.results
+);
+
 const currentRenderList = () => {
+  const displayResults = getDisplayResults();
   if (state.viewMode === 'file') {
-    if (!state.groupedResults) state.groupedResults = groupResultsByFile(state.results);
+    if (!state.groupedResults) state.groupedResults = groupResultsByFile(displayResults);
     return state.groupedResults;
   }
-  return state.results;
+  return displayResults;
 };
 
 const appendNextBatch = () => {
@@ -882,9 +898,14 @@ const renderResults = (payload) => {
     const { results, keywords } = payload;
     state.results = results || [];
     state.keywords = keywords || [];
+    state.filteredResults = null;
+    state.filter.folders = new Set();
+    state.filter.extensions = new Set();
+    buildFilterOptions();
+    renderFilterOptions();
   }
 
-  resultCountEl.textContent = `${state.results.length} 件`;
+  updateResultCount();
 
   // Show/hide export button
   if (exportBtn) {
@@ -913,6 +934,149 @@ const renderResults = (payload) => {
     if (state.renderedCount >= currentRenderList().length) break;
     appendNextBatch();
   }
+};
+
+const updateResultCount = () => {
+  const total = state.results.length;
+  const displayCount = getDisplayResults().length;
+  resultCountEl.textContent = state.filteredResults
+    ? `${displayCount} / ${total} 件`
+    : `${total} 件`;
+};
+
+const getExtension = (path) => {
+  if (!path) return 'unknown';
+  const slashIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  const dotIdx = path.lastIndexOf('.');
+  if (dotIdx === -1 || dotIdx < slashIdx) return 'unknown';
+  return `.${path.slice(dotIdx + 1).toLowerCase()}`;
+};
+
+const buildFilterOptions = () => {
+  const folderCounts = new Map();
+  const folderNames = new Map();
+  const folderNameCounts = new Map();
+  const extCounts = new Map();
+  state.results.forEach((r) => {
+    const folderId = r.folderId || 'unknown';
+    const folderName = r.folderName || 'unknown';
+    folderNames.set(folderId, folderName);
+    folderCounts.set(folderId, (folderCounts.get(folderId) || 0) + 1);
+    folderNameCounts.set(folderName, (folderNameCounts.get(folderName) || 0) + 1);
+    const extKey = getExtension(r.path);
+    extCounts.set(extKey, (extCounts.get(extKey) || 0) + 1);
+  });
+  state.filterOptions.folders = Array.from(folderCounts.entries())
+    .map(([id, count]) => {
+      const name = folderNames.get(id) || 'unknown';
+      const dupCount = folderNameCounts.get(name) || 0;
+      const label = dupCount > 1 ? `${name} (${id})` : name;
+      return { id, name, label, count };
+    })
+    .sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label));
+  state.filterOptions.extensions = Array.from(extCounts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name));
+};
+
+const renderFilterOptions = () => {
+  if (!filterFoldersEl || !filterExtensionsEl) return;
+  const folderHtml = state.filterOptions.folders.length ? state.filterOptions.folders.map((item, idx) => {
+    const checked = state.filter.folders.has(item.id) ? 'checked' : '';
+    return `
+      <label class="filter-item">
+        <input type="checkbox" data-value="${item.id}" ${checked}>
+        <span>${item.label}</span>
+        <span class="filter-count">${item.count}</span>
+      </label>
+    `;
+  }).join('') : '<div class="empty-sub">対象なし</div>';
+  const extHtml = state.filterOptions.extensions.length ? state.filterOptions.extensions.map((item, idx) => {
+    const checked = state.filter.extensions.has(item.name) ? 'checked' : '';
+    return `
+      <label class="filter-item">
+        <input type="checkbox" data-value="${item.name}" ${checked}>
+        <span>${item.name}</span>
+        <span class="filter-count">${item.count}</span>
+      </label>
+    `;
+  }).join('') : '<div class="empty-sub">対象なし</div>';
+  filterFoldersEl.innerHTML = folderHtml;
+  filterExtensionsEl.innerHTML = extHtml;
+};
+
+const applyFilters = () => {
+  const selectedFolders = new Set();
+  filterFoldersEl?.querySelectorAll('input[type="checkbox"]:checked').forEach((el) => {
+    selectedFolders.add(el.dataset.value);
+  });
+  state.filter.folders = selectedFolders;
+
+  const selectedExts = new Set();
+  filterExtensionsEl?.querySelectorAll('input[type="checkbox"]:checked').forEach((el) => {
+    selectedExts.add(el.dataset.value);
+  });
+  state.filter.extensions = selectedExts;
+
+  const hasFolderFilter = state.filter.folders.size > 0;
+  const hasExtFilter = state.filter.extensions.size > 0;
+
+  if (!hasFolderFilter && !hasExtFilter) {
+    state.filteredResults = null;
+  } else {
+    state.filteredResults = state.results.filter((r) => {
+      if (hasFolderFilter && !state.filter.folders.has(r.folderId || 'unknown')) return false;
+      const extKey = getExtension(r.path);
+      if (hasExtFilter && !state.filter.extensions.has(extKey)) return false;
+      return true;
+    });
+  }
+
+  updateResultCount();
+  if (!getDisplayResults().length) {
+    resultsEl.innerHTML = `
+      <div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="11" cy="11" r="8"/>
+          <path d="m21 21-4.35-4.35"/>
+          <path d="M8 11h6"/>
+        </svg>
+        <p class="empty-title">一致なし</p>
+        <p class="empty-sub">フィルタ条件を見直してください。</p>
+      </div>
+    `;
+    return;
+  }
+  resetRenderState();
+  resultsEl.innerHTML = '<div class="results-list"></div>';
+  resultsEl.scrollTop = 0;
+  appendNextBatch();
+};
+
+const clearFilters = () => {
+  state.filter.folders = new Set();
+  state.filter.extensions = new Set();
+  state.filteredResults = null;
+  renderFilterOptions();
+  updateResultCount();
+  if (!state.results.length) {
+    resultsEl.innerHTML = `
+      <div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="11" cy="11" r="8"/>
+          <path d="m21 21-4.35-4.35"/>
+          <path d="M8 11h6"/>
+        </svg>
+        <p class="empty-title">一致なし</p>
+        <p class="empty-sub">別のキーワードやフォルダでお試しください。</p>
+      </div>
+    `;
+    return;
+  }
+  resetRenderState();
+  resultsEl.innerHTML = '<div class="results-list"></div>';
+  resultsEl.scrollTop = 0;
+  appendNextBatch();
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -967,9 +1131,6 @@ const runSearch = async (evt) => {
 
     // Save to query history
     state.currentIndexUuid = data.index_uuid || null;
-    state.facets = data.facets || null;
-    state.resultSetId = data.result_set_id || null;
-
     addToQueryHistory(
       query,
       state.mode,
@@ -981,7 +1142,6 @@ const runSearch = async (evt) => {
     );
 
     renderResults(data);
-    updateFacetFilters();
   } catch (err) {
     resultsEl.innerHTML = `
       <div class="empty-state">
@@ -1132,68 +1292,26 @@ if (exportBtn) {
   });
 }
 
-// ═══════════════════════════════════════════════════════════════
-// FACET FILTERS
-// ═══════════════════════════════════════════════════════════════
-
-const updateFacetFilters = () => {
-  if (!state.facets || !facetsPanel) return;
-
-  const hasFacets = (
-    (state.facets.folders && state.facets.folders.length > 0) ||
-    (state.facets.extensions && state.facets.extensions.length > 0)
-  );
-
-  if (!hasFacets) {
-    facetsPanel.style.display = 'none';
-    return;
-  }
-
-  facetsPanel.style.display = 'block';
-
-  let html = '';
-
-  // Folder facets
-  if (state.facets.folders && state.facets.folders.length > 0) {
-    html += `
-      <div class="facet-group">
-        <div class="facet-title">フォルダ</div>
-        <div class="facet-list">
-          ${state.facets.folders.slice(0, 10).map(facet => `
-            <div class="facet-item">
-              <span class="facet-name">${facet.name}</span>
-              <span class="facet-count">${facet.count}</span>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
-  }
-
-  // Extension facets
-  if (state.facets.extensions && state.facets.extensions.length > 0) {
-    html += `
-      <div class="facet-group">
-        <div class="facet-title">ファイル形式</div>
-        <div class="facet-list">
-          ${state.facets.extensions.slice(0, 10).map(facet => `
-            <div class="facet-item">
-              <span class="facet-name">${facet.name}</span>
-              <span class="facet-count">${facet.count}</span>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
-  }
-
-  facetsContent.innerHTML = html;
-};
-
-if (closeFacets) {
-  closeFacets.addEventListener('click', () => {
-    facetsPanel.style.display = 'none';
+if (filterBtn && filterPanel) {
+  filterBtn.addEventListener('click', () => {
+    const show = filterPanel.style.display === 'none';
+    filterPanel.style.display = show ? 'block' : 'none';
+    if (show) renderFilterOptions();
   });
+}
+
+if (closeFilterBtn && filterPanel) {
+  closeFilterBtn.addEventListener('click', () => {
+    filterPanel.style.display = 'none';
+  });
+}
+
+if (applyFilterBtn) {
+  applyFilterBtn.addEventListener('click', applyFilters);
+}
+
+if (clearFilterBtn) {
+  clearFilterBtn.addEventListener('click', clearFilters);
 }
 
 // ═══════════════════════════════════════════════════════════════

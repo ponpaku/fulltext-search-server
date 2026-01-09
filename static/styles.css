@@ -1,7 +1,7 @@
 /* ═══════════════════════════════════════════════════════════════
    フォルダ内テキスト検索 — YomiToku Style Design System
    System Version: 1.1.1
-   File Version: 1.1.0
+   File Version: 1.1.4
    ═══════════════════════════════════════════════════════════════ */
 
 :root {
@@ -305,6 +305,86 @@ h3 {
   font-size: 12px;
   font-weight: 500;
   color: var(--text-secondary);
+}
+
+/* ===== RESULT FILTER ===== */
+.filter-panel {
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-inner);
+  padding: 12px 14px;
+}
+
+.filter-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.filter-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.filter-group label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  display: block;
+  margin-bottom: 6px;
+}
+
+.filter-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.filter-list {
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.filter-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.filter-item input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+}
+
+.filter-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.filter-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .label-row {
@@ -1029,71 +1109,6 @@ select:disabled {
   background: var(--warning-bg);
 }
 
-/* ===== FACETS ===== */
-.facets-panel {
-  border-bottom: 1px solid var(--border);
-  padding: 10px 14px;
-  background: var(--panel-inner);
-}
-
-.facets-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.facets-content {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.facet-group {
-  flex: 1;
-  min-width: 200px;
-}
-
-.facet-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin-bottom: 6px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.facet-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.facet-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 4px 8px;
-  border-radius: var(--radius);
-  font-size: 12px;
-  transition: background 0.15s;
-  cursor: default;
-}
-
-.facet-item:hover {
-  background: var(--accent-light);
-}
-
-.facet-name {
-  color: var(--text);
-  font-family: 'IBM Plex Mono', monospace;
-}
-
-.facet-count {
-  color: var(--muted);
-  font-size: 11px;
-}
-
 /* ===== HISTORY ===== */
 .history-list {
   display: flex;
@@ -1190,6 +1205,10 @@ select:disabled {
   
   .status-list {
     max-height: none;
+  }
+
+  .filter-grid {
+    grid-template-columns: 1fr;
   }
 }
 

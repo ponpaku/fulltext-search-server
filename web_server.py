@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.1"
-# File Version: 1.5.0
+# File Version: 1.5.5
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -739,140 +739,6 @@ def build_query_groups(query: str, space_mode: str) -> Tuple[List[str], List[Lis
     return keywords, norm_keyword_groups
 
 
-def calculate_facets(results: List[Dict]) -> Dict:
-    """検索結果からファセット情報（集計）を計算する"""
-    folder_counts = defaultdict(int)
-    ext_counts = defaultdict(int)
-
-    for result in results:
-        # Folder facet
-        folder_name = result.get("folderName", "unknown")
-        folder_counts[folder_name] += 1
-
-        # Extension facet
-        path = result.get("path", "")
-        ext = Path(path).suffix.lower() if path else "unknown"
-        if not ext:
-            ext = "unknown"
-        ext_counts[ext] += 1
-
-    # Sort by count (descending)
-    folder_facets = [
-        {"name": name, "count": count}
-        for name, count in sorted(folder_counts.items(), key=lambda x: (-x[1], x[0]))
-    ]
-    ext_facets = [
-        {"name": ext, "count": count}
-        for ext, count in sorted(ext_counts.items(), key=lambda x: (-x[1], x[0]))
-    ]
-
-    return {
-        "folders": folder_facets,
-        "extensions": ext_facets,
-    }
-
-
-def cleanup_expired_result_sets():
-    """期限切れの結果セットを削除"""
-    global result_sets
-    now = time.time()
-    with result_set_lock:
-        expired_ids = [
-            rid for rid, data in result_sets.items()
-            if now - data["created_at"] > RESULT_SET_TTL
-        ]
-        for rid in expired_ids:
-            del result_sets[rid]
-
-        # 最大数を超えた場合は古いものから削除
-        if len(result_sets) > RESULT_SET_MAX_COUNT:
-            sorted_sets = sorted(result_sets.items(), key=lambda x: x[1]["created_at"])
-            to_remove = len(result_sets) - RESULT_SET_MAX_COUNT
-            for rid, _ in sorted_sets[:to_remove]:
-                del result_sets[rid]
-
-
-def create_result_set(results: List[Dict], query: str) -> str:
-    """結果セットを作成してIDを返す"""
-    global result_sets
-    cleanup_expired_result_sets()
-
-    result_set_id = f"rs_{int(time.time())}_{hashlib.md5(query.encode()).hexdigest()[:8]}"
-
-    with result_set_lock:
-        result_sets[result_set_id] = {
-            "results": results,
-            "created_at": time.time(),
-            "query": query,
-        }
-
-    return result_set_id
-
-
-def get_result_set(result_set_id: str) -> List[Dict] | None:
-    """結果セットを取得（期限切れの場合はNone）"""
-    cleanup_expired_result_sets()
-
-    with result_set_lock:
-        data = result_sets.get(result_set_id)
-        if data is None:
-            return None
-
-        # Check expiry
-        if time.time() - data["created_at"] > RESULT_SET_TTL:
-            del result_sets[result_set_id]
-            return None
-
-        return data["results"]
-
-
-def search_within_results(
-    base_results: List[Dict],
-    norm_keyword_groups: List[List[str]],
-    raw_keywords: List[str],
-    search_mode: str,
-    range_limit: int,
-    space_mode: str,
-) -> List[Dict]:
-    """既存の結果セット内を検索する"""
-    filtered_results = []
-
-    for result in base_results:
-        # Reconstruct entry-like structure for search_text_logic
-        # We need to search in the detail text which contains more context
-        detail_text = result.get("detail", result.get("context", ""))
-        if not detail_text:
-            continue
-
-        # Create a minimal entry for searching
-        entry = {
-            "raw": detail_text,
-            "norm": normalize_text(detail_text),
-            "norm_jp": apply_space_mode(normalize_text(detail_text), "jp"),
-            "norm_all": apply_space_mode(normalize_text(detail_text), "all"),
-            "file": result.get("file", ""),
-            "path": result.get("path", ""),
-            "displayPath": result.get("displayPath", ""),
-            "page": result.get("page", ""),
-            "folderId": result.get("folderId", ""),
-            "folderName": result.get("folderName", ""),
-        }
-
-        # Check if this entry matches the new search criteria
-        matches = search_text_logic(
-            entry,
-            norm_keyword_groups,
-            raw_keywords,
-            search_mode,
-            range_limit,
-            space_mode,
-        )
-
-        if matches:
-            # Use the new match result (which has updated context/detail)
-            filtered_results.extend(matches)
-
-    return filtered_results
 
 
 def check_range_match(norm_text: str, norm_keyword_groups: List[List[str]], range_limit: int) -> bool:
@@ -2212,7 +2078,6 @@ class SearchRequest(BaseModel):
     range_limit: int = Field(0, ge=0, le=5000)
     space_mode: str = Field("jp", pattern="^(none|jp|all)$")
     folders: List[str]
-    result_set_id: str | None = Field(None, description="結果セット内検索用のID")
 
     @field_validator("query")
     def validate_query(cls, v: str) -> str:
@@ -2346,11 +2211,6 @@ search_concurrency = 1
 search_executor = None
 search_execution_mode = "thread"
 
-# Result set storage for search-within-results feature
-result_sets: Dict[str, Dict] = {}  # {result_set_id: {"results": [...], "created_at": timestamp, "query": str}}
-result_set_lock = threading.RLock()
-RESULT_SET_TTL = 3600  # 1 hour
-RESULT_SET_MAX_COUNT = 100  # Maximum number of result sets to store
 
 WORKER_MEMORY_PAGES: Dict[str, List[Dict]] = {}
 WORKER_FOLDER_META: Dict[str, Tuple[str, str]] = {}
@@ -3488,58 +3348,6 @@ async def search(req: SearchRequest):
     if rw_lock is None or search_semaphore is None:
         raise HTTPException(status_code=503, detail="検索システムの初期化中です")
 
-    # Check if searching within a result set
-    if req.result_set_id:
-        start_time = time.time()
-        base_results = get_result_set(req.result_set_id)
-        if base_results is None:
-            raise HTTPException(status_code=404, detail="結果セットが見つからないか期限切れです")
-
-        keywords, norm_keyword_groups = build_query_groups(req.query, req.space_mode)
-        raw_keywords = keywords
-
-        # Search within the result set
-        loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(
-            None,
-            search_within_results,
-            base_results,
-            norm_keyword_groups,
-            raw_keywords,
-            req.mode,
-            req.range_limit,
-            req.space_mode,
-        )
-
-        elapsed = time.time() - start_time
-        log_info(
-            f"結果内検索完了: base_results={len(base_results)} filtered={len(results)} "
-            f"mode={req.mode} 時間={elapsed:.2f}s"
-        )
-
-        # Get current index UUID
-        current_gen_name = get_current_generation_pointer()
-        index_uuid = current_gen_name or "unknown"
-
-        # Calculate facets
-        facets = calculate_facets(results) if results else {"folders": [], "extensions": []}
-
-        # Create new result set for further refinement
-        new_result_set_id = create_result_set(results, req.query) if results else None
-
-        payload = {
-            "count": len(results),
-            "results": results,
-            "keywords": keywords,
-            "folder_ids": [],  # Not applicable for within-results search
-            "index_uuid": index_uuid,
-            "facets": facets,
-            "result_set_id": new_result_set_id,
-            "parent_result_set_id": req.result_set_id,
-        }
-
-        return payload
-
     # Normal search (full index scan)
     async with search_semaphore:
         async with rw_lock.read_lock():
@@ -3602,20 +3410,12 @@ async def search(req: SearchRequest):
         current_gen_name = get_current_generation_pointer()
         index_uuid = current_gen_name or "unknown"
 
-        # Calculate facets
-        facets = calculate_facets(results) if results else {"folders": [], "extensions": []}
-
-        # Create result set for future within-results searching
-        result_set_id = create_result_set(results, req.query) if results else None
-
         payload = {
             "count": len(results),
             "results": results,
             "keywords": keywords_for_response,
             "folder_ids": normalize_folder_ids(target_ids),
             "index_uuid": index_uuid,
-            "facets": facets,
-            "result_set_id": result_set_id,
         }
         payload = apply_folder_order(payload, folder_order)
         payload_bytes = estimate_payload_bytes(payload)
