@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.0.0
- * File Version: 1.0.0
+ * System Version: 1.1.1
+ * File Version: 1.1.0
  */
 
 const state = {
@@ -20,6 +20,11 @@ const state = {
   fileModalFolderId: null,
   fileModalFolderName: '',
   fileModalScope: 'indexed',
+  queryHistory: [],
+  historyModalOpen: false,
+  currentIndexUuid: null,
+  facets: null,
+  resultSetId: null,
 };
 
 // DOM Elements
@@ -47,6 +52,12 @@ const fileListContent = $('fileListContent');
 const fileScopeToggle = $('fileScopeToggle');
 const helpModal = $('helpModal');
 const helpModalClose = $('helpModalClose');
+const historyToggle = $('historyToggle');
+const historyModal = $('historyModal');
+const historyModalClose = $('historyModalClose');
+const historyListContent = $('historyListContent');
+const clearHistoryBtn = $('clearHistoryBtn');
+const exportBtn = $('exportBtn');
 
 // ═══════════════════════════════════════════════════════════════
 // CLIPBOARD PERMISSION
@@ -119,6 +130,89 @@ const toggleTheme = () => {
   const next = current === 'dark' ? 'light' : 'dark';
   document.documentElement.dataset.theme = next;
   localStorage.setItem('theme', next);
+};
+
+// ═══════════════════════════════════════════════════════════════
+// QUERY HISTORY
+// ═══════════════════════════════════════════════════════════════
+
+const HISTORY_STORAGE_KEY = 'searchQueryHistory';
+const HISTORY_MAX_ITEMS = 50;
+
+const loadQueryHistory = () => {
+  try {
+    const stored = localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (stored) {
+      state.queryHistory = JSON.parse(stored);
+    }
+  } catch (err) {
+    console.warn('Failed to load query history', err);
+    state.queryHistory = [];
+  }
+};
+
+const saveQueryHistory = () => {
+  try {
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(state.queryHistory));
+  } catch (err) {
+    console.warn('Failed to save query history', err);
+  }
+};
+
+const addToQueryHistory = (query, mode, range, spaceMode, folders, resultCount, indexUuid) => {
+  const timestamp = Date.now();
+  const historyItem = {
+    id: `${timestamp}-${Math.random().toString(36).substr(2, 9)}`,
+    query,
+    mode,
+    range_limit: range,
+    space_mode: spaceMode,
+    folders: [...folders],
+    result_count: resultCount,
+    index_uuid: indexUuid,
+    timestamp,
+    pinned: false,
+  };
+
+  // Remove duplicate (same query and params)
+  state.queryHistory = state.queryHistory.filter(item => {
+    if (item.pinned) return true; // Keep pinned items
+    return !(
+      item.query === query &&
+      item.mode === mode &&
+      item.range_limit === range &&
+      item.space_mode === spaceMode &&
+      JSON.stringify(item.folders.sort()) === JSON.stringify([...folders].sort())
+    );
+  });
+
+  // Add to beginning
+  state.queryHistory.unshift(historyItem);
+
+  // Keep only max items (excluding pinned)
+  const pinned = state.queryHistory.filter(item => item.pinned);
+  const unpinned = state.queryHistory.filter(item => !item.pinned).slice(0, HISTORY_MAX_ITEMS);
+  state.queryHistory = [...pinned, ...unpinned];
+
+  saveQueryHistory();
+};
+
+const togglePinHistory = (itemId) => {
+  const item = state.queryHistory.find(h => h.id === itemId);
+  if (item) {
+    item.pinned = !item.pinned;
+    saveQueryHistory();
+  }
+};
+
+const deleteHistoryItem = (itemId) => {
+  state.queryHistory = state.queryHistory.filter(h => h.id !== itemId);
+  saveQueryHistory();
+};
+
+const clearUnpinnedHistory = () => {
+  state.queryHistory = state.queryHistory.filter(h => h.pinned);
+  saveQueryHistory();
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -407,6 +501,144 @@ helpModal.addEventListener('click', (e) => {
 });
 helpModalClose.addEventListener('click', closeHelpModal);
 
+// ═══════════════════════════════════════════════════════════════
+// HISTORY MODAL
+// ═══════════════════════════════════════════════════════════════
+
+const closeHistoryModal = () => {
+  historyModal.classList.remove('open');
+  historyModal.setAttribute('aria-hidden', 'true');
+};
+
+const openHistoryModal = () => {
+  historyModal.classList.add('open');
+  historyModal.setAttribute('aria-hidden', 'false');
+  renderHistoryList();
+};
+
+const formatTimestamp = (timestamp) => {
+  const date = new Date(timestamp);
+  const now = Date.now();
+  const diff = now - timestamp;
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+
+  if (minutes < 1) return '今';
+  if (minutes < 60) return `${minutes}分前`;
+  if (hours < 24) return `${hours}時間前`;
+  if (days < 7) return `${days}日前`;
+
+  return date.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
+};
+
+const executeHistorySearch = async (item) => {
+  closeHistoryModal();
+
+  // Restore form state
+  queryInput.value = item.query;
+  setMode(item.mode);
+  rangeInput.value = item.range_limit || 0;
+  spaceModeSelect.value = item.space_mode || 'jp';
+
+  // Restore folder selection
+  state.selected = new Set(item.folders);
+  renderFolderList(state.folders);
+
+  // Execute search
+  await runSearch();
+};
+
+const renderHistoryList = () => {
+  if (!state.queryHistory || state.queryHistory.length === 0) {
+    historyListContent.innerHTML = '<div class="loading-placeholder">履歴がありません</div>';
+    return;
+  }
+
+  const items = state.queryHistory.map(item => {
+    const folderNames = item.folders
+      .map(fid => state.folders.find(f => f.id === fid)?.name || fid)
+      .join(', ');
+    const spaceModeLabel = {
+      'none': 'なし',
+      'jp': '和文のみ',
+      'all': 'すべて'
+    }[item.space_mode] || item.space_mode;
+
+    return `
+      <div class="history-item ${item.pinned ? 'pinned' : ''}" data-id="${item.id}">
+        <div class="history-header">
+          <div class="history-query">${item.query}</div>
+          <div class="history-actions">
+            <button type="button" class="chip-btn pin-btn" data-id="${item.id}" title="${item.pinned ? 'ピン解除' : 'ピン留め'}">
+              <svg viewBox="0 0 24 24" fill="${item.pinned ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2">
+                <path d="M12 2v8m0 0l-4.5 4.5M12 10l4.5 4.5M12 22v-10"/>
+              </svg>
+            </button>
+            <button type="button" class="chip-btn delete-btn" data-id="${item.id}" title="削除">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="history-meta">
+          <span class="chip">${item.mode}</span>
+          ${item.range_limit > 0 ? `<span class="chip">範囲: ${item.range_limit}</span>` : ''}
+          <span class="chip">空白: ${spaceModeLabel}</span>
+          <span class="chip">${item.result_count} 件</span>
+          <span class="chip subtle">${formatTimestamp(item.timestamp)}</span>
+        </div>
+        <div class="history-folders">${folderNames}</div>
+      </div>
+    `;
+  }).join('');
+
+  historyListContent.innerHTML = `<div class="history-list">${items}</div>`;
+
+  // Bind event handlers
+  historyListContent.querySelectorAll('.history-item').forEach(item => {
+    const id = item.dataset.id;
+    const historyItem = state.queryHistory.find(h => h.id === id);
+    if (!historyItem) return;
+
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('.pin-btn') || e.target.closest('.delete-btn')) return;
+      executeHistorySearch(historyItem);
+    });
+  });
+
+  historyListContent.querySelectorAll('.pin-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePinHistory(btn.dataset.id);
+      renderHistoryList();
+    });
+  });
+
+  historyListContent.querySelectorAll('.delete-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (confirm('この履歴を削除しますか？')) {
+        deleteHistoryItem(btn.dataset.id);
+        renderHistoryList();
+      }
+    });
+  });
+};
+
+historyToggle.addEventListener('click', openHistoryModal);
+historyModal.addEventListener('click', (e) => {
+  if (e.target === historyModal) closeHistoryModal();
+});
+historyModalClose.addEventListener('click', closeHistoryModal);
+clearHistoryBtn.addEventListener('click', () => {
+  if (confirm('ピン留め以外の履歴をすべて削除しますか？')) {
+    clearUnpinnedHistory();
+    renderHistoryList();
+  }
+});
+
 const groupResultsByFile = (results) => {
   const grouped = new Map();
   results.forEach((hit, idx) => {
@@ -651,6 +883,11 @@ const renderResults = (payload) => {
 
   resultCountEl.textContent = `${state.results.length} 件`;
 
+  // Show/hide export button
+  if (exportBtn) {
+    exportBtn.style.display = state.results.length > 0 ? 'inline-flex' : 'none';
+  }
+
   if (!state.results.length) {
     resultsEl.innerHTML = `
       <div class="empty-state">
@@ -724,7 +961,24 @@ const runSearch = async (evt) => {
       throw new Error(err.detail || '検索に失敗しました');
     }
     const data = await res.json();
+
+    // Save to query history
+    state.currentIndexUuid = data.index_uuid || null;
+    state.facets = data.facets || null;
+    state.resultSetId = data.result_set_id || null;
+
+    addToQueryHistory(
+      query,
+      state.mode,
+      rangeVal,
+      spaceMode,
+      payload.folders,
+      data.count || 0,
+      state.currentIndexUuid
+    );
+
     renderResults(data);
+    updateFacetFilters();
   } catch (err) {
     resultsEl.innerHTML = `
       <div class="empty-state">
@@ -810,12 +1064,87 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// Export button
+if (exportBtn) {
+  exportBtn.addEventListener('click', async () => {
+    if (!state.results.length) {
+      alert('エクスポートする検索結果がありません');
+      return;
+    }
+
+    const query = queryInput.value.trim();
+    const rangeVal = parseInt(rangeInput.value || '0', 10);
+    const spaceMode = spaceModeSelect?.value || 'jp';
+    const payload = {
+      query,
+      mode: state.mode,
+      range_limit: state.mode === 'AND' ? rangeVal : 0,
+      space_mode: spaceMode,
+      folders: Array.from(state.selected),
+    };
+
+    try {
+      exportBtn.disabled = true;
+      const originalHTML = exportBtn.innerHTML;
+      exportBtn.innerHTML = '<span class="loading-spinner" style="width: 14px; height: 14px; border-width: 2px;"></span> エクスポート中...';
+
+      const res = await fetch('/api/export?format=csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || 'エクスポートに失敗しました');
+      }
+
+      // Download the file
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `search_results_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+
+      exportBtn.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M20 6L9 17l-5-5"/>
+        </svg>
+        完了
+      `;
+      setTimeout(() => {
+        exportBtn.innerHTML = originalHTML;
+      }, 2000);
+    } catch (err) {
+      alert(`エクスポートエラー: ${err.message}`);
+      console.error(err);
+      exportBtn.innerHTML = originalHTML;
+    } finally {
+      exportBtn.disabled = false;
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FACET FILTERS
+// ═══════════════════════════════════════════════════════════════
+
+const updateFacetFilters = () => {
+  // Placeholder for facet filter UI updates
+  // Will be implemented with backend support
+};
+
 // ═══════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════
 
 window.addEventListener('DOMContentLoaded', () => {
   initTheme();
+  loadQueryHistory();
   setMode('AND');
   loadFolders();
   queryInput.focus();

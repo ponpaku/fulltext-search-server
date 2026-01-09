@@ -1,7 +1,7 @@
 /* ═══════════════════════════════════════════════════════════════
    フォルダ内テキスト検索 — YomiToku Style Design System
-   System Version: 1.0.0
-   File Version: 1.0.0
+   System Version: 1.1.1
+   File Version: 1.1.0
    ═══════════════════════════════════════════════════════════════ */
 
 :root {
@@ -1027,6 +1027,68 @@ select:disabled {
   color: var(--warning);
   border-color: var(--warning);
   background: var(--warning-bg);
+}
+
+/* ===== HISTORY ===== */
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-inner);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.history-item:hover {
+  border-color: var(--accent);
+  background: var(--accent-light);
+}
+
+.history-item.pinned {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.history-query {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.history-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.history-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.history-folders {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: 'IBM Plex Mono', monospace;
 }
 
 /* ===== FOOTER ===== */

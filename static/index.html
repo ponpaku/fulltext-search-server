@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <!-- System Version: 1.0.0 | File Version: 1.0.0 -->
+  <!-- System Version: 1.1.1 | File Version: 1.1.0 -->
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>フォルダ内テキスト検索</title>
@@ -46,15 +46,24 @@
       <div class="panel">
         <div class="panel-header">
           <h2>検索設定</h2>
-          <button type="button" class="chip-btn" id="refreshFolders" title="フォルダ再読込">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-              <path d="M3 3v5h5"/>
-              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
-              <path d="M16 21h5v-5"/>
-            </svg>
-            再読込
-          </button>
+          <div style="display: flex; gap: 6px;">
+            <button type="button" class="chip-btn" id="historyToggle" title="検索履歴">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M12 6v6l4 2"/>
+              </svg>
+              履歴
+            </button>
+            <button type="button" class="chip-btn" id="refreshFolders" title="フォルダ再読込">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                <path d="M3 3v5h5"/>
+                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+                <path d="M16 21h5v-5"/>
+              </svg>
+              再読込
+            </button>
+          </div>
         </div>
 
         <form id="searchForm" class="search-form">
@@ -143,9 +152,19 @@
             <h2>検索結果</h2>
             <span class="result-count" id="resultCount">0 件</span>
           </div>
-          <div class="toggle-group compact" id="viewToggle" title="表示切替">
-            <button type="button" class="toggle-btn active" data-view="hit">ヒット単位</button>
-            <button type="button" class="toggle-btn" data-view="file">ファイル単位</button>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <button type="button" class="chip-btn" id="exportBtn" title="エクスポート" style="display: none;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              CSV
+            </button>
+            <div class="toggle-group compact" id="viewToggle" title="表示切替">
+              <button type="button" class="toggle-btn active" data-view="hit">ヒット単位</button>
+              <button type="button" class="toggle-btn" data-view="file">ファイル単位</button>
+            </div>
           </div>
         </div>
         <div class="results-container" id="results">
@@ -212,10 +231,35 @@
           <h4>テーマ切り替え</h4>
           <p>右上の太陽/月アイコンでライト/ダークを切り替えられます。</p>
         </section>
+        <section>
+          <h4>検索履歴</h4>
+          <p>「履歴」ボタンから過去の検索を再実行できます。ピン留めで重要な検索を保存できます。</p>
+        </section>
       </div>
     </div>
   </div>
 
-  <script src="/static/app.js?v=4"></script>
+  <div class="modal-backdrop" id="historyModal" aria-hidden="true">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>検索履歴</h3>
+        <div style="display: flex; gap: 6px;">
+          <button type="button" class="chip-btn" id="clearHistoryBtn" title="ピン留め以外を削除">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+            クリア
+          </button>
+          <button type="button" class="modal-close" id="historyModalClose" aria-label="閉じる">×</button>
+        </div>
+      </div>
+      <div class="modal-body" id="historyListContent">
+        <div class="loading-placeholder">履歴がありません</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>
