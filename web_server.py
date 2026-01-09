@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.0"
-# File Version: 1.3.3
+# File Version: 1.3.4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -1882,7 +1882,7 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
                 # 1回目の不在 → 削除候補としてマーク（インデックスには残す）
                 prev_state["deletion_candidate_since"] = time.time()
                 current_file_states[path_str] = prev_state
-                log_info(f"削除候補: {path_str}")
+                log_notice(f"削除候補: {path_str}")
 
     # 段階的ハッシングによる差分判定
     targets = []
@@ -2448,6 +2448,17 @@ def log_warn(message: str):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     if Fore and Style:
         print(f"{Fore.RED}[{timestamp}] {message}{Style.RESET_ALL}")
+    else:
+        print(f"[{timestamp}] {message}")
+
+
+def log_notice(message: str):
+    """黄色で表示する通知ログ（削除候補など、警告だが重要度は中程度）."""
+    if colorama_init:
+        colorama_init()
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    if Fore and Style:
+        print(f"{Fore.YELLOW}[{timestamp}] {message}{Style.RESET_ALL}")
     else:
         print(f"[{timestamp}] {message}")
 
