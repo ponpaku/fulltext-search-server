@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.0"
-# File Version: 1.3.2
+# File Version: 1.3.3
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -1877,7 +1877,7 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
                 # 2回目の不在 → 削除として扱う（インデックスから除外）
                 if path_str in valid_cache:
                     del valid_cache[path_str]
-                    log_info(f"削除検知: {path_str}")
+                    log_warn(f"削除確定（インデックス除外）: {path_str}")
             else:
                 # 1回目の不在 → 削除候補としてマーク（インデックスには残す）
                 prev_state["deletion_candidate_since"] = time.time()
