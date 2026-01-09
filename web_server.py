@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.0"
-# File Version: 1.3.5
+# File Version: 1.3.6
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -2759,20 +2759,20 @@ def validate_cache_integrity(cache_index: Dict[str, Dict]) -> Dict[str, Dict]:
         cached_uuid = entry.get("index_uuid")
         cached_schema = entry.get("schema_version")
 
-        # index_uuid の不一致チェック
-        if cached_uuid and cached_uuid != current_uuid:
+        # index_uuid のチェック（欠落または不一致で無効化）
+        if not cached_uuid or cached_uuid != current_uuid:
             log_info(
-                f"キャッシュ削除（index更新）: key={key[:8]}.. "
-                f"cached_uuid={cached_uuid} != current_uuid={current_uuid}"
+                f"キャッシュ削除（index_uuid不一致/欠落）: key={key[:8]}.. "
+                f"cached={cached_uuid} current={current_uuid}"
             )
             invalid_count += 1
             continue
 
-        # schema_version の不一致チェック
-        if cached_schema and cached_schema != current_schema:
+        # schema_version のチェック（欠落または不一致で無効化）
+        if not cached_schema or cached_schema != current_schema:
             log_info(
-                f"キャッシュ削除（schema変更）: key={key[:8]}.. "
-                f"cached_schema={cached_schema} != current_schema={current_schema}"
+                f"キャッシュ削除（schema不一致/欠落）: key={key[:8]}.. "
+                f"cached={cached_schema} current={current_schema}"
             )
             invalid_count += 1
             continue
@@ -3264,22 +3264,22 @@ def _try_get_fixed_cache(
         cached_uuid = fixed_entry.get("index_uuid")
         cached_schema = fixed_entry.get("schema_version")
 
-        # index_uuid の不一致チェック
-        if cached_uuid and current_uuid and cached_uuid != current_uuid:
+        # index_uuid のチェック（欠落または不一致で無効化）
+        if current_uuid and (not cached_uuid or cached_uuid != current_uuid):
             log_warn(
-                f"キャッシュ無効化（index更新）: key={cache_key[:8]}.. "
-                f"cached_uuid={cached_uuid} != current_uuid={current_uuid}"
+                f"キャッシュ無効化（index_uuid不一致/欠落）: key={cache_key[:8]}.. "
+                f"cached={cached_uuid} current={current_uuid}"
             )
             with cache_lock:
                 fixed_cache_index.pop(cache_key, None)
                 save_fixed_cache_index(fixed_cache_index)
             return None
 
-        # schema_version の不一致チェック
-        if cached_schema and current_schema and cached_schema != current_schema:
+        # schema_version のチェック（欠落または不一致で無効化）
+        if current_schema and (not cached_schema or cached_schema != current_schema):
             log_warn(
-                f"キャッシュ無効化（schema変更）: key={cache_key[:8]}.. "
-                f"cached_schema={cached_schema} != current_schema={current_schema}"
+                f"キャッシュ無効化（schema不一致/欠落）: key={cache_key[:8]}.. "
+                f"cached={cached_schema} current={current_schema}"
             )
             with cache_lock:
                 fixed_cache_index.pop(cache_key, None)
