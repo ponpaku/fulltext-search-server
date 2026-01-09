@@ -36,6 +36,24 @@ System Version: 1.1.0
 - 2026-01-08: リファクタリング: 重複した検索ロジック関数を共通ヘルパー関数に統合（`_find_raw_hit_position`, `_build_search_result`）。
 - 2026-01-08: リファクタリング: `/api/search` エンドポイントのキャッシュ取得ロジックをヘルパー関数に抽出（`_try_get_memory_cache`, `_try_get_fixed_cache`）。
 - 2026-01-08: 不要な静的ファイル `index - コピー.html` を削除。
+- 2026-01-08: 機能追加: 段階的ハッシングによる差分更新の精度向上（issue #4 対応）。
+  - `file_state.jsonl` による前回状態の保存・参照（DB不要）
+  - 段階的な差分判定: stat（size + mtime_ns + inode/file_id） → fast fingerprint → full hash
+  - `DIFF_MODE` 設定: `stat` / `stat+fastfp` / `stat+fastfp+fullhash`（デフォルト: `stat`）
+  - fast fingerprint: 先頭/末尾チャンクのハッシュ（`FAST_FP_BYTES` で設定可能、デフォルト: 64KB）
+  - full hash: 条件付きフルハッシュ（`FULL_HASH_ALGO`, `FULL_HASH_PATHS`, `FULL_HASH_EXTS` で設定可能）
+  - 削除検知の安全策: 2回連続で不在の場合のみ削除として扱う（瞬断対策）
+  - mtime保持・同サイズ更新などの見逃しを防止
+- 2026-01-08: バグ修正: 段階的ハッシング設定のパースを安全化（レビュー指摘対応）。
+  - `FAST_FP_BYTES` の不正値・非数値でもデフォルトにフォールバック（例外回避）
+  - `FULL_HASH_ALGO` の空文字もデフォルトにフォールバック
+  - `file_state.jsonl` の部分破損に対応（行単位でスキップ、全体失敗を回避）
+- 2026-01-08: バグ修正: 削除検知の安全策を修正（レビュー指摘対応）。
+  - valid_cache のフィルタ順序を変更し、削除候補が正しく機能するように修正
+  - 1回目の不在時にインデックスに残し、2回目の不在で削除する仕様を正しく実装
+  - ネットワーク瞬断での誤削除を防止
+  - 削除確定時のログを `log_warn` に変更し、文言を「削除確定（インデックス除外）」に明確化
+  - `log_notice` 関数を追加（黄色表示）し、削除候補ログを `log_notice` に変更して視認性を向上
 
 ## 1.0.0
 
