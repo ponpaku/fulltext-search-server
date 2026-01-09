@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.0"
-# File Version: 1.3.4
+# File Version: 1.3.5
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -1283,6 +1283,17 @@ def load_manifest(gen_dir: Path) -> Dict | None:
     try:
         with manifest_path.open("r", encoding="utf-8") as f:
             return json.load(f)
+    except Exception:
+        return None
+
+
+def get_current_generation_manifest() -> Dict | None:
+    """現在の世代の manifest.json を取得."""
+    try:
+        gen_dir = get_current_generation_dir()
+        if not gen_dir or not gen_dir.exists():
+            return None
+        return load_manifest(gen_dir)
     except Exception:
         return None
 
@@ -2725,6 +2736,56 @@ def prune_cache_dir(valid_keys: set[str]) -> None:
                 continue
 
 
+def validate_cache_integrity(cache_index: Dict[str, Dict]) -> Dict[str, Dict]:
+    """
+    キャッシュの整合性を検証し、不一致のエントリを削除する。
+    起動時やインデックス更新後に呼び出される。
+    """
+    current_manifest = get_current_generation_manifest()
+    if not current_manifest:
+        log_warn("キャッシュ整合性検証: 現在の世代のmanifestが取得できません")
+        return cache_index
+
+    current_uuid = current_manifest.get("index_uuid")
+    current_schema = current_manifest.get("schema_version")
+    if not current_uuid or not current_schema:
+        log_warn("キャッシュ整合性検証: manifestにindex_uuid/schema_versionがありません")
+        return cache_index
+
+    valid_cache: Dict[str, Dict] = {}
+    invalid_count = 0
+
+    for key, entry in cache_index.items():
+        cached_uuid = entry.get("index_uuid")
+        cached_schema = entry.get("schema_version")
+
+        # index_uuid の不一致チェック
+        if cached_uuid and cached_uuid != current_uuid:
+            log_info(
+                f"キャッシュ削除（index更新）: key={key[:8]}.. "
+                f"cached_uuid={cached_uuid} != current_uuid={current_uuid}"
+            )
+            invalid_count += 1
+            continue
+
+        # schema_version の不一致チェック
+        if cached_schema and cached_schema != current_schema:
+            log_info(
+                f"キャッシュ削除（schema変更）: key={key[:8]}.. "
+                f"cached_schema={cached_schema} != current_schema={current_schema}"
+            )
+            invalid_count += 1
+            continue
+
+        # 有効なキャッシュとして保持
+        valid_cache[key] = entry
+
+    if invalid_count > 0:
+        log_info(f"キャッシュ整合性検証完了: {invalid_count}件の古いキャッシュを削除しました")
+
+    return valid_cache
+
+
 def init_cache_settings(memory_cache: MemoryCache) -> None:
     max_entries = env_int("CACHE_MEM_MAX_ENTRIES", 200)
     max_mb = env_int("CACHE_MEM_MAX_MB", 200)
@@ -2930,6 +2991,21 @@ async def schedule_index_rebuild():
 
 def rebuild_fixed_cache():
     global fixed_cache_index
+
+    # 現在の世代のmanifestを取得（キャッシュ整合性のため）
+    current_manifest = get_current_generation_manifest()
+    if not current_manifest:
+        log_warn("固定キャッシュ再構築: 現在の世代のmanifestが取得できません")
+        return
+
+    current_index_uuid = current_manifest.get("index_uuid")
+    current_schema_version = current_manifest.get("schema_version")
+    if not current_index_uuid or not current_schema_version:
+        log_warn("固定キャッシュ再構築: manifestにindex_uuid/schema_versionがありません")
+        return
+
+    log_info(f"固定キャッシュ再構築開始: index_uuid={current_index_uuid}, schema={current_schema_version}")
+
     prune_query_stats(query_stats)
     candidates = [v for v in query_stats.values() if is_fixed_candidate(v)]
     candidates = rank_fixed_candidates(candidates)
@@ -2983,6 +3059,8 @@ def rebuild_fixed_cache():
             "range": entry["range"],
             "space": entry["space"],
             "folders": target_ids,
+            "index_uuid": current_index_uuid,
+            "schema_version": current_schema_version,
         }
 
     with cache_lock:
@@ -3021,6 +3099,9 @@ async def startup_event():
     )
     init_cache_settings(memory_cache)
     fixed_cache_index = load_fixed_cache_index()
+    # キャッシュ整合性検証（インデックス更新後の古いキャッシュを削除）
+    fixed_cache_index = validate_cache_integrity(fixed_cache_index)
+    save_fixed_cache_index(fixed_cache_index)
     prune_cache_dir(set(fixed_cache_index.keys()))
     query_stats = load_query_stats()
     query_stats_dirty = False
@@ -3174,6 +3255,37 @@ def _try_get_fixed_cache(
         fixed_entry = fixed_cache_index.get(cache_key)
     if not fixed_entry:
         return None
+
+    # キャッシュ整合性チェック: index_uuid と schema_version を検証
+    current_manifest = get_current_generation_manifest()
+    if current_manifest:
+        current_uuid = current_manifest.get("index_uuid")
+        current_schema = current_manifest.get("schema_version")
+        cached_uuid = fixed_entry.get("index_uuid")
+        cached_schema = fixed_entry.get("schema_version")
+
+        # index_uuid の不一致チェック
+        if cached_uuid and current_uuid and cached_uuid != current_uuid:
+            log_warn(
+                f"キャッシュ無効化（index更新）: key={cache_key[:8]}.. "
+                f"cached_uuid={cached_uuid} != current_uuid={current_uuid}"
+            )
+            with cache_lock:
+                fixed_cache_index.pop(cache_key, None)
+                save_fixed_cache_index(fixed_cache_index)
+            return None
+
+        # schema_version の不一致チェック
+        if cached_schema and current_schema and cached_schema != current_schema:
+            log_warn(
+                f"キャッシュ無効化（schema変更）: key={cache_key[:8]}.. "
+                f"cached_schema={cached_schema} != current_schema={current_schema}"
+            )
+            with cache_lock:
+                fixed_cache_index.pop(cache_key, None)
+                save_fixed_cache_index(fixed_cache_index)
+            return None
+
     payload = read_fixed_cache_payload(fixed_entry)
     if payload and payload_matches_folders(payload, target_ids):
         payload = apply_folder_order(payload, folder_order)
