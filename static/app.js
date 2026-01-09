@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.0.0
- * File Version: 1.0.0
+ * System Version: 1.1.1
+ * File Version: 1.1.9
  */
 
 const state = {
@@ -11,6 +11,7 @@ const state = {
   keywords: [],
   viewMode: 'hit',
   results: [],
+  filteredResults: null,
   folderListOpen: true,
   isSearching: false,
   spaceMode: 'none',
@@ -20,6 +21,17 @@ const state = {
   fileModalFolderId: null,
   fileModalFolderName: '',
   fileModalScope: 'indexed',
+  queryHistory: [],
+  historyModalOpen: false,
+  currentIndexUuid: null,
+  filter: {
+    folders: new Set(),
+    extensions: new Set(),
+  },
+  filterOptions: {
+    folders: [],
+    extensions: [],
+  },
 };
 
 // DOM Elements
@@ -47,6 +59,19 @@ const fileListContent = $('fileListContent');
 const fileScopeToggle = $('fileScopeToggle');
 const helpModal = $('helpModal');
 const helpModalClose = $('helpModalClose');
+const historyToggle = $('historyToggle');
+const historyModal = $('historyModal');
+const historyModalClose = $('historyModalClose');
+const historyListContent = $('historyListContent');
+const clearHistoryBtn = $('clearHistoryBtn');
+const exportBtn = $('exportBtn');
+const filterBtn = $('filterBtn');
+const filterPanel = $('filterPanel');
+const filterFoldersEl = $('filterFolders');
+const filterExtensionsEl = $('filterExtensions');
+const applyFilterBtn = $('applyFilter');
+const clearFilterBtn = $('clearFilter');
+const closeFilterBtn = $('closeFilter');
 
 // ═══════════════════════════════════════════════════════════════
 // CLIPBOARD PERMISSION
@@ -119,6 +144,89 @@ const toggleTheme = () => {
   const next = current === 'dark' ? 'light' : 'dark';
   document.documentElement.dataset.theme = next;
   localStorage.setItem('theme', next);
+};
+
+// ═══════════════════════════════════════════════════════════════
+// QUERY HISTORY
+// ═══════════════════════════════════════════════════════════════
+
+const HISTORY_STORAGE_KEY = 'searchQueryHistory';
+const HISTORY_MAX_ITEMS = 30;
+
+const loadQueryHistory = () => {
+  try {
+    const stored = localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (stored) {
+      state.queryHistory = JSON.parse(stored);
+    }
+  } catch (err) {
+    console.warn('Failed to load query history', err);
+    state.queryHistory = [];
+  }
+};
+
+const saveQueryHistory = () => {
+  try {
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(state.queryHistory));
+  } catch (err) {
+    console.warn('Failed to save query history', err);
+  }
+};
+
+const addToQueryHistory = (query, mode, range, spaceMode, folders, resultCount, indexUuid) => {
+  const timestamp = Date.now();
+  const historyItem = {
+    id: `${timestamp}-${Math.random().toString(36).substr(2, 9)}`,
+    query,
+    mode,
+    range_limit: range,
+    space_mode: spaceMode,
+    folders: [...folders],
+    result_count: resultCount,
+    index_uuid: indexUuid,
+    timestamp,
+    pinned: false,
+  };
+
+  // Remove duplicate (same query and params)
+  state.queryHistory = state.queryHistory.filter(item => {
+    if (item.pinned) return true; // Keep pinned items
+    return !(
+      item.query === query &&
+      item.mode === mode &&
+      item.range_limit === range &&
+      item.space_mode === spaceMode &&
+      JSON.stringify(item.folders.sort()) === JSON.stringify([...folders].sort())
+    );
+  });
+
+  // Add to beginning
+  state.queryHistory.unshift(historyItem);
+
+  // Keep only max items (excluding pinned)
+  const pinned = state.queryHistory.filter(item => item.pinned);
+  const unpinned = state.queryHistory.filter(item => !item.pinned).slice(0, HISTORY_MAX_ITEMS);
+  state.queryHistory = [...pinned, ...unpinned];
+
+  saveQueryHistory();
+};
+
+const togglePinHistory = (itemId) => {
+  const item = state.queryHistory.find(h => h.id === itemId);
+  if (item) {
+    item.pinned = !item.pinned;
+    saveQueryHistory();
+  }
+};
+
+const deleteHistoryItem = (itemId) => {
+  state.queryHistory = state.queryHistory.filter(h => h.id !== itemId);
+  saveQueryHistory();
+};
+
+const clearUnpinnedHistory = () => {
+  state.queryHistory = state.queryHistory.filter(h => h.pinned);
+  saveQueryHistory();
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -392,11 +500,13 @@ fileModalClose.addEventListener('click', closeFileModal);
 // ═══════════════════════════════════════════════════════════════
 
 const closeHelpModal = () => {
+  helpToggle?.focus();
   helpModal.classList.remove('open');
   helpModal.setAttribute('aria-hidden', 'true');
 };
 
 const openHelpModal = () => {
+  helpToggle?.blur();
   helpModal.classList.add('open');
   helpModal.setAttribute('aria-hidden', 'false');
 };
@@ -406,6 +516,146 @@ helpModal.addEventListener('click', (e) => {
   if (e.target === helpModal) closeHelpModal();
 });
 helpModalClose.addEventListener('click', closeHelpModal);
+
+// ═══════════════════════════════════════════════════════════════
+// HISTORY MODAL
+// ═══════════════════════════════════════════════════════════════
+
+const closeHistoryModal = () => {
+  historyToggle?.focus();
+  historyModal.classList.remove('open');
+  historyModal.setAttribute('aria-hidden', 'true');
+};
+
+const openHistoryModal = () => {
+  historyToggle?.blur();
+  historyModal.classList.add('open');
+  historyModal.setAttribute('aria-hidden', 'false');
+  renderHistoryList();
+};
+
+const formatTimestamp = (timestamp) => {
+  const date = new Date(timestamp);
+  const now = Date.now();
+  const diff = now - timestamp;
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+
+  if (minutes < 1) return '今';
+  if (minutes < 60) return `${minutes}分前`;
+  if (hours < 24) return `${hours}時間前`;
+  if (days < 7) return `${days}日前`;
+
+  return date.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
+};
+
+const executeHistorySearch = async (item) => {
+  closeHistoryModal();
+
+  // Restore form state
+  queryInput.value = item.query;
+  setMode(item.mode);
+  rangeInput.value = item.range_limit || 0;
+  spaceModeSelect.value = item.space_mode || 'jp';
+
+  // Restore folder selection
+  state.selected = new Set(item.folders);
+  renderFolderList(state.folders);
+
+  // Execute search
+  await runSearch();
+};
+
+const renderHistoryList = () => {
+  if (!state.queryHistory || state.queryHistory.length === 0) {
+    historyListContent.innerHTML = '<div class="loading-placeholder">履歴がありません</div>';
+    return;
+  }
+
+  const items = state.queryHistory.map(item => {
+    const folderNames = item.folders
+      .map(fid => state.folders.find(f => f.id === fid)?.name || fid)
+      .join(', ');
+    const spaceModeLabel = {
+      'none': 'なし',
+      'jp': '和文のみ',
+      'all': 'すべて'
+    }[item.space_mode] || item.space_mode;
+
+    return `
+      <div class="history-item ${item.pinned ? 'pinned' : ''}" data-id="${item.id}">
+        <div class="history-header">
+          <div class="history-query">${item.query}</div>
+          <div class="history-actions">
+            <button type="button" class="chip-btn pin-btn" data-id="${item.id}" title="${item.pinned ? 'ピン解除' : 'ピン留め'}">
+              <svg viewBox="0 0 24 24" fill="${item.pinned ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2">
+                <path d="M12 2v8m0 0l-4.5 4.5M12 10l4.5 4.5M12 22v-10"/>
+              </svg>
+            </button>
+            <button type="button" class="chip-btn delete-btn" data-id="${item.id}" title="削除">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="history-meta">
+          <span class="chip">${item.mode}</span>
+          ${item.range_limit > 0 ? `<span class="chip">範囲: ${item.range_limit}</span>` : ''}
+          <span class="chip">空白: ${spaceModeLabel}</span>
+          <span class="chip">${item.result_count} 件</span>
+          <span class="chip subtle">${formatTimestamp(item.timestamp)}</span>
+        </div>
+        <div class="history-folders">${folderNames}</div>
+      </div>
+    `;
+  }).join('');
+
+  historyListContent.innerHTML = `<div class="history-list">${items}</div>`;
+
+  // Bind event handlers
+  historyListContent.querySelectorAll('.history-item').forEach(item => {
+    const id = item.dataset.id;
+    const historyItem = state.queryHistory.find(h => h.id === id);
+    if (!historyItem) return;
+
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('.pin-btn') || e.target.closest('.delete-btn')) return;
+      executeHistorySearch(historyItem);
+    });
+  });
+
+  historyListContent.querySelectorAll('.pin-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePinHistory(btn.dataset.id);
+      renderHistoryList();
+    });
+  });
+
+  historyListContent.querySelectorAll('.delete-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (confirm('この履歴を削除しますか？')) {
+        deleteHistoryItem(btn.dataset.id);
+        renderHistoryList();
+      }
+    });
+  });
+};
+
+historyToggle.addEventListener('click', openHistoryModal);
+historyModal.addEventListener('click', (e) => {
+  if (e.target === historyModal) closeHistoryModal();
+});
+historyModalClose.addEventListener('click', closeHistoryModal);
+clearHistoryBtn.addEventListener('click', () => {
+  if (confirm('ピン留め以外の履歴をすべて削除しますか？')) {
+    clearUnpinnedHistory();
+    renderHistoryList();
+  }
+});
 
 const groupResultsByFile = (results) => {
   const grouped = new Map();
@@ -607,12 +857,17 @@ const resetRenderState = () => {
   state.isRenderingBatch = false;
 };
 
+const getDisplayResults = () => (
+  state.filteredResults ? state.filteredResults : state.results
+);
+
 const currentRenderList = () => {
+  const displayResults = getDisplayResults();
   if (state.viewMode === 'file') {
-    if (!state.groupedResults) state.groupedResults = groupResultsByFile(state.results);
+    if (!state.groupedResults) state.groupedResults = groupResultsByFile(displayResults);
     return state.groupedResults;
   }
-  return state.results;
+  return displayResults;
 };
 
 const appendNextBatch = () => {
@@ -647,9 +902,19 @@ const renderResults = (payload) => {
     const { results, keywords } = payload;
     state.results = results || [];
     state.keywords = keywords || [];
+    state.filteredResults = null;
+    state.filter.folders = new Set();
+    state.filter.extensions = new Set();
+    buildFilterOptions();
+    renderFilterOptions();
   }
 
-  resultCountEl.textContent = `${state.results.length} 件`;
+  updateResultCount();
+
+  // Show/hide export button
+  if (exportBtn) {
+    exportBtn.style.display = state.results.length > 0 ? 'inline-flex' : 'none';
+  }
 
   if (!state.results.length) {
     resultsEl.innerHTML = `
@@ -673,6 +938,149 @@ const renderResults = (payload) => {
     if (state.renderedCount >= currentRenderList().length) break;
     appendNextBatch();
   }
+};
+
+const updateResultCount = () => {
+  const total = state.results.length;
+  const displayCount = getDisplayResults().length;
+  resultCountEl.textContent = state.filteredResults
+    ? `${displayCount} / ${total} 件`
+    : `${total} 件`;
+};
+
+const getExtension = (path) => {
+  if (!path) return 'unknown';
+  const slashIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  const dotIdx = path.lastIndexOf('.');
+  if (dotIdx === -1 || dotIdx < slashIdx) return 'unknown';
+  return `.${path.slice(dotIdx + 1).toLowerCase()}`;
+};
+
+const buildFilterOptions = () => {
+  const folderCounts = new Map();
+  const folderNames = new Map();
+  const folderNameCounts = new Map();
+  const extCounts = new Map();
+  state.results.forEach((r) => {
+    const folderId = r.folderId || 'unknown';
+    const folderName = r.folderName || 'unknown';
+    folderNames.set(folderId, folderName);
+    folderCounts.set(folderId, (folderCounts.get(folderId) || 0) + 1);
+    folderNameCounts.set(folderName, (folderNameCounts.get(folderName) || 0) + 1);
+    const extKey = getExtension(r.path);
+    extCounts.set(extKey, (extCounts.get(extKey) || 0) + 1);
+  });
+  state.filterOptions.folders = Array.from(folderCounts.entries())
+    .map(([id, count]) => {
+      const name = folderNames.get(id) || 'unknown';
+      const dupCount = folderNameCounts.get(name) || 0;
+      const label = dupCount > 1 ? `${name} (${id})` : name;
+      return { id, name, label, count };
+    })
+    .sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label));
+  state.filterOptions.extensions = Array.from(extCounts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name));
+};
+
+const renderFilterOptions = () => {
+  if (!filterFoldersEl || !filterExtensionsEl) return;
+  const folderHtml = state.filterOptions.folders.length ? state.filterOptions.folders.map((item, idx) => {
+    const checked = state.filter.folders.has(item.id) ? 'checked' : '';
+    return `
+      <label class="filter-item">
+        <input type="checkbox" data-value="${item.id}" ${checked}>
+        <span>${item.label}</span>
+        <span class="filter-count">${item.count}</span>
+      </label>
+    `;
+  }).join('') : '<div class="empty-sub">対象なし</div>';
+  const extHtml = state.filterOptions.extensions.length ? state.filterOptions.extensions.map((item, idx) => {
+    const checked = state.filter.extensions.has(item.name) ? 'checked' : '';
+    return `
+      <label class="filter-item">
+        <input type="checkbox" data-value="${item.name}" ${checked}>
+        <span>${item.name}</span>
+        <span class="filter-count">${item.count}</span>
+      </label>
+    `;
+  }).join('') : '<div class="empty-sub">対象なし</div>';
+  filterFoldersEl.innerHTML = folderHtml;
+  filterExtensionsEl.innerHTML = extHtml;
+};
+
+const applyFilters = () => {
+  const selectedFolders = new Set();
+  filterFoldersEl?.querySelectorAll('input[type="checkbox"]:checked').forEach((el) => {
+    selectedFolders.add(el.dataset.value);
+  });
+  state.filter.folders = selectedFolders;
+
+  const selectedExts = new Set();
+  filterExtensionsEl?.querySelectorAll('input[type="checkbox"]:checked').forEach((el) => {
+    selectedExts.add(el.dataset.value);
+  });
+  state.filter.extensions = selectedExts;
+
+  const hasFolderFilter = state.filter.folders.size > 0;
+  const hasExtFilter = state.filter.extensions.size > 0;
+
+  if (!hasFolderFilter && !hasExtFilter) {
+    state.filteredResults = null;
+  } else {
+    state.filteredResults = state.results.filter((r) => {
+      if (hasFolderFilter && !state.filter.folders.has(r.folderId || 'unknown')) return false;
+      const extKey = getExtension(r.path);
+      if (hasExtFilter && !state.filter.extensions.has(extKey)) return false;
+      return true;
+    });
+  }
+
+  updateResultCount();
+  if (!getDisplayResults().length) {
+    resultsEl.innerHTML = `
+      <div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="11" cy="11" r="8"/>
+          <path d="m21 21-4.35-4.35"/>
+          <path d="M8 11h6"/>
+        </svg>
+        <p class="empty-title">一致なし</p>
+        <p class="empty-sub">フィルタ条件を見直してください。</p>
+      </div>
+    `;
+    return;
+  }
+  resetRenderState();
+  resultsEl.innerHTML = '<div class="results-list"></div>';
+  resultsEl.scrollTop = 0;
+  appendNextBatch();
+};
+
+const clearFilters = () => {
+  state.filter.folders = new Set();
+  state.filter.extensions = new Set();
+  state.filteredResults = null;
+  renderFilterOptions();
+  updateResultCount();
+  if (!state.results.length) {
+    resultsEl.innerHTML = `
+      <div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="11" cy="11" r="8"/>
+          <path d="m21 21-4.35-4.35"/>
+          <path d="M8 11h6"/>
+        </svg>
+        <p class="empty-title">一致なし</p>
+        <p class="empty-sub">別のキーワードやフォルダでお試しください。</p>
+      </div>
+    `;
+    return;
+  }
+  resetRenderState();
+  resultsEl.innerHTML = '<div class="results-list"></div>';
+  resultsEl.scrollTop = 0;
+  appendNextBatch();
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -724,6 +1132,19 @@ const runSearch = async (evt) => {
       throw new Error(err.detail || '検索に失敗しました');
     }
     const data = await res.json();
+
+    // Save to query history
+    state.currentIndexUuid = data.index_uuid || null;
+    addToQueryHistory(
+      query,
+      state.mode,
+      rangeVal,
+      spaceMode,
+      payload.folders,
+      data.count || 0,
+      state.currentIndexUuid
+    );
+
     renderResults(data);
   } catch (err) {
     resultsEl.innerHTML = `
@@ -810,12 +1231,100 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// Export button
+if (exportBtn) {
+  exportBtn.addEventListener('click', async () => {
+    if (!state.results.length) {
+      alert('エクスポートする検索結果がありません');
+      return;
+    }
+
+    const query = queryInput.value.trim();
+    const rangeVal = parseInt(rangeInput.value || '0', 10);
+    const spaceMode = spaceModeSelect?.value || 'jp';
+    const payload = {
+      query,
+      mode: state.mode,
+      range_limit: state.mode === 'AND' ? rangeVal : 0,
+      space_mode: spaceMode,
+      folders: Array.from(state.selected),
+    };
+
+    try {
+      exportBtn.disabled = true;
+      const originalHTML = exportBtn.innerHTML;
+      exportBtn.innerHTML = '<span class="loading-spinner" style="width: 14px; height: 14px; border-width: 2px;"></span> エクスポート中...';
+
+      const res = await fetch('/api/export?format=csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || 'エクスポートに失敗しました');
+      }
+
+      // Download the file
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `search_results_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+
+      exportBtn.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M20 6L9 17l-5-5"/>
+        </svg>
+        完了
+      `;
+      setTimeout(() => {
+        exportBtn.innerHTML = originalHTML;
+      }, 2000);
+    } catch (err) {
+      alert(`エクスポートエラー: ${err.message}`);
+      console.error(err);
+      exportBtn.innerHTML = originalHTML;
+    } finally {
+      exportBtn.disabled = false;
+    }
+  });
+}
+
+if (filterBtn && filterPanel) {
+  filterBtn.addEventListener('click', () => {
+    const show = filterPanel.style.display === 'none';
+    filterPanel.style.display = show ? 'block' : 'none';
+    if (show) renderFilterOptions();
+  });
+}
+
+if (closeFilterBtn && filterPanel) {
+  closeFilterBtn.addEventListener('click', () => {
+    filterPanel.style.display = 'none';
+  });
+}
+
+if (applyFilterBtn) {
+  applyFilterBtn.addEventListener('click', applyFilters);
+}
+
+if (clearFilterBtn) {
+  clearFilterBtn.addEventListener('click', clearFilters);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════
 
 window.addEventListener('DOMContentLoaded', () => {
   initTheme();
+  loadQueryHistory();
   setMode('AND');
   loadFolders();
   queryInput.focus();

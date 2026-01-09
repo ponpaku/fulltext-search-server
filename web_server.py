@@ -22,12 +22,13 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.1"
-# File Version: 1.3.8
+# File Version: 1.5.5
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+import io
 try:
     from colorama import Fore, Style, init as colorama_init
 except Exception:
@@ -736,6 +737,8 @@ def build_query_groups(query: str, space_mode: str) -> Tuple[List[str], List[Lis
         if k.strip()
     ]
     return keywords, norm_keyword_groups
+
+
 
 
 def check_range_match(norm_text: str, norm_keyword_groups: List[List[str]], range_limit: int) -> bool:
@@ -2208,6 +2211,7 @@ search_concurrency = 1
 search_executor = None
 search_execution_mode = "thread"
 
+
 WORKER_MEMORY_PAGES: Dict[str, List[Dict]] = {}
 WORKER_FOLDER_META: Dict[str, Tuple[str, str]] = {}
 
@@ -3343,6 +3347,8 @@ async def search(req: SearchRequest):
     global rw_lock, search_semaphore, search_executor, search_execution_mode
     if rw_lock is None or search_semaphore is None:
         raise HTTPException(status_code=503, detail="検索システムの初期化中です")
+
+    # Normal search (full index scan)
     async with search_semaphore:
         async with rw_lock.read_lock():
             start_time = time.time()
@@ -3399,11 +3405,17 @@ async def search(req: SearchRequest):
             f"検索完了: folders={len(target_ids)} results={len(results)} "
             f"mode={req.mode} workers={worker_count} 時間={elapsed:.2f}s"
         )
+
+        # Get current index UUID
+        current_gen_name = get_current_generation_pointer()
+        index_uuid = current_gen_name or "unknown"
+
         payload = {
             "count": len(results),
             "results": results,
             "keywords": keywords_for_response,
             "folder_ids": normalize_folder_ids(target_ids),
+            "index_uuid": index_uuid,
         }
         payload = apply_folder_order(payload, folder_order)
         payload_bytes = estimate_payload_bytes(payload)
@@ -3429,6 +3441,130 @@ async def search(req: SearchRequest):
 
         # UI側でハイライトしやすいように検索キーワードも返す
         return payload
+
+
+@app.post("/api/export")
+async def export_results(req: SearchRequest, format: str = "csv"):
+    """検索結果をCSV/JSON形式でエクスポートする"""
+    global rw_lock, search_semaphore, search_executor, search_execution_mode
+    if rw_lock is None or search_semaphore is None:
+        raise HTTPException(status_code=503, detail="検索システムの初期化中です")
+
+    # Validate format
+    if format not in ["csv", "json"]:
+        raise HTTPException(status_code=400, detail="format は csv または json を指定してください")
+
+    # Execute search first
+    async with search_semaphore:
+        async with rw_lock.read_lock():
+            available_ids = set(folder_states.keys())
+            target_ids = [f for f in req.folders if f in available_ids and folder_states[f].get("ready")]
+            if not target_ids:
+                raise HTTPException(status_code=400, detail="有効な検索対象フォルダがありません")
+
+            params = SearchParams(req.mode, req.range_limit, req.space_mode)
+            keywords, norm_keyword_groups = build_query_groups(req.query, req.space_mode)
+            raw_keywords = keywords
+            worker_count = search_worker_count
+            loop = asyncio.get_running_loop()
+
+            if search_execution_mode == "process":
+                results = await loop.run_in_executor(
+                    search_executor,
+                    perform_search_process,
+                    target_ids,
+                    params,
+                    norm_keyword_groups,
+                    raw_keywords,
+                    worker_count,
+                )
+            else:
+                results = await loop.run_in_executor(
+                    None,
+                    perform_search,
+                    target_ids,
+                    params,
+                    norm_keyword_groups,
+                    raw_keywords,
+                    worker_count,
+                )
+
+    # Get current index UUID
+    current_gen_name = get_current_generation_pointer()
+    index_uuid = current_gen_name or "unknown"
+
+    # Prepare metadata
+    metadata = {
+        "query": req.query,
+        "mode": req.mode,
+        "range_limit": req.range_limit,
+        "space_mode": req.space_mode,
+        "folders": target_ids,
+        "folder_names": [folder_states[fid]["name"] for fid in target_ids if fid in folder_states],
+        "index_uuid": index_uuid,
+        "result_count": len(results),
+        "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    if format == "csv":
+        # Create CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Write metadata as comments
+        writer.writerow(["# フォルダ内テキスト検索 - エクスポート"])
+        writer.writerow(["# クエリ", req.query])
+        writer.writerow(["# モード", req.mode])
+        writer.writerow(["# 範囲", req.range_limit])
+        writer.writerow(["# 空白除去", req.space_mode])
+        writer.writerow(["# インデックスUUID", index_uuid])
+        writer.writerow(["# エクスポート日時", metadata["exported_at"]])
+        writer.writerow(["# 検索フォルダ", ", ".join(metadata["folder_names"])])
+        writer.writerow(["# 結果件数", len(results)])
+        writer.writerow([])
+
+        # Write header
+        writer.writerow(["ファイル名", "パス", "ページ", "フォルダ", "スニペット", "詳細"])
+
+        # Write results
+        for result in results:
+            writer.writerow([
+                result.get("file", ""),
+                result.get("displayPath") or result.get("path", ""),
+                result.get("page", ""),
+                result.get("folderName", ""),
+                result.get("context", ""),
+                result.get("detail", ""),
+            ])
+
+        csv_content = output.getvalue()
+        output.close()
+
+        # Return as downloadable file
+        return StreamingResponse(
+            io.BytesIO(csv_content.encode("utf-8-sig")),  # UTF-8 with BOM for Excel compatibility
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="search_results_{time.strftime("%Y%m%d_%H%M%S")}.csv"'
+            }
+        )
+
+    else:  # json
+        # Create JSON with metadata
+        export_data = {
+            "metadata": metadata,
+            "results": results,
+        }
+
+        json_content = json.dumps(export_data, ensure_ascii=False, indent=2)
+
+        return StreamingResponse(
+            io.BytesIO(json_content.encode("utf-8")),
+            media_type="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="search_results_{time.strftime("%Y%m%d_%H%M%S")}.json"'
+            }
+        )
 
 
 @app.get("/api/health")
