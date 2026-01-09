@@ -1029,6 +1029,71 @@ select:disabled {
   background: var(--warning-bg);
 }
 
+/* ===== FACETS ===== */
+.facets-panel {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 14px;
+  background: var(--panel-inner);
+}
+
+.facets-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.facets-content {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.facet-group {
+  flex: 1;
+  min-width: 200px;
+}
+
+.facet-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.facet-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.facet-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  transition: background 0.15s;
+  cursor: default;
+}
+
+.facet-item:hover {
+  background: var(--accent-light);
+}
+
+.facet-name {
+  color: var(--text);
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+.facet-count {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 /* ===== HISTORY ===== */
 .history-list {
   display: flex;

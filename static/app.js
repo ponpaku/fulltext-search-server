@@ -58,6 +58,9 @@ const historyModalClose = $('historyModalClose');
 const historyListContent = $('historyListContent');
 const clearHistoryBtn = $('clearHistoryBtn');
 const exportBtn = $('exportBtn');
+const facetsPanel = $('facetsPanel');
+const facetsContent = $('facetsContent');
+const closeFacets = $('closeFacets');
 
 // ═══════════════════════════════════════════════════════════════
 // CLIPBOARD PERMISSION
@@ -1134,9 +1137,64 @@ if (exportBtn) {
 // ═══════════════════════════════════════════════════════════════
 
 const updateFacetFilters = () => {
-  // Placeholder for facet filter UI updates
-  // Will be implemented with backend support
+  if (!state.facets || !facetsPanel) return;
+
+  const hasFacets = (
+    (state.facets.folders && state.facets.folders.length > 0) ||
+    (state.facets.extensions && state.facets.extensions.length > 0)
+  );
+
+  if (!hasFacets) {
+    facetsPanel.style.display = 'none';
+    return;
+  }
+
+  facetsPanel.style.display = 'block';
+
+  let html = '';
+
+  // Folder facets
+  if (state.facets.folders && state.facets.folders.length > 0) {
+    html += `
+      <div class="facet-group">
+        <div class="facet-title">フォルダ</div>
+        <div class="facet-list">
+          ${state.facets.folders.slice(0, 10).map(facet => `
+            <div class="facet-item">
+              <span class="facet-name">${facet.name}</span>
+              <span class="facet-count">${facet.count}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  // Extension facets
+  if (state.facets.extensions && state.facets.extensions.length > 0) {
+    html += `
+      <div class="facet-group">
+        <div class="facet-title">ファイル形式</div>
+        <div class="facet-list">
+          ${state.facets.extensions.slice(0, 10).map(facet => `
+            <div class="facet-item">
+              <span class="facet-name">${facet.name}</span>
+              <span class="facet-count">${facet.count}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  facetsContent.innerHTML = html;
 };
+
+if (closeFacets) {
+  closeFacets.addEventListener('click', () => {
+    facetsPanel.style.display = 'none';
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════
 // INIT
