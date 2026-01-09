@@ -1,6 +1,19 @@
 # 変更履歴
 
-System Version: 1.1.1
+System Version: 1.1.3
+
+## 1.1.3
+
+- 2026-01-10: 改善: 正規化モードは `INDEX_STORE_NORMALIZED=1` の場合のみ有効化するように調整。
+  - 無効時は `exact` へフォールバックし、警告ログを出力
+
+## 1.1.2
+
+- 2026-01-10: 機能追加: あいまい検索オプション（NFKC + casefold 正規化）を追加（issue #6 対応）。
+  - `normalize_mode` による正規化検索（exact / normalized）をAPIに追加
+  - `QUERY_NORMALIZE` と `INDEX_STORE_NORMALIZED` の設定を追加
+  - 正規化済みテキストの保持に対応し、キャッシュキーにも正規化モードを反映
+  - UIに正規化モードの選択を追加（検索履歴/エクスポートにも反映）
 
 ## 1.1.1
 

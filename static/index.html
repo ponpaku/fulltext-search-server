@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <!-- System Version: 1.1.1 | File Version: 1.1.6 -->
+  <!-- System Version: 1.1.2 | File Version: 1.1.7 -->
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>フォルダ内テキスト検索</title>
@@ -111,6 +111,14 @@
                 <option value="all">すべて</option>
               </select>
               <span class="hint">検索にのみ適用</span>
+            </div>
+            <div class="form-group compact">
+              <label for="normalizeMode">正規化</label>
+              <select id="normalizeMode" class="input-sm select-sm">
+                <option value="exact" selected>完全一致</option>
+                <option value="normalized">NFKC+casefold</option>
+              </select>
+              <span class="hint">表記ゆれを吸収</span>
             </div>
           </div>
 

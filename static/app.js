@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.1
- * File Version: 1.1.9
+ * System Version: 1.1.2
+ * File Version: 1.2.0
  */
 
 const state = {
@@ -18,6 +18,7 @@ const state = {
   renderedCount: 0,
   groupedResults: null,
   isRenderingBatch: false,
+  normalizeMode: 'exact',
   fileModalFolderId: null,
   fileModalFolderName: '',
   fileModalScope: 'indexed',
@@ -43,6 +44,7 @@ const resultCountEl = $('resultCount');
 const modeGroup = $('modeGroup');
 const rangeInput = $('range');
 const spaceModeSelect = $('spaceMode');
+const normalizeModeSelect = $('normalizeMode');
 const searchForm = $('searchForm');
 const queryInput = $('query');
 const viewToggle = $('viewToggle');
@@ -173,7 +175,7 @@ const saveQueryHistory = () => {
   }
 };
 
-const addToQueryHistory = (query, mode, range, spaceMode, folders, resultCount, indexUuid) => {
+const addToQueryHistory = (query, mode, range, spaceMode, normalizeMode, folders, resultCount, indexUuid) => {
   const timestamp = Date.now();
   const historyItem = {
     id: `${timestamp}-${Math.random().toString(36).substr(2, 9)}`,
@@ -181,6 +183,7 @@ const addToQueryHistory = (query, mode, range, spaceMode, folders, resultCount, 
     mode,
     range_limit: range,
     space_mode: spaceMode,
+    normalize_mode: normalizeMode,
     folders: [...folders],
     result_count: resultCount,
     index_uuid: indexUuid,
@@ -196,6 +199,7 @@ const addToQueryHistory = (query, mode, range, spaceMode, folders, resultCount, 
       item.mode === mode &&
       item.range_limit === range &&
       item.space_mode === spaceMode &&
+      (item.normalize_mode || 'exact') === normalizeMode &&
       JSON.stringify(item.folders.sort()) === JSON.stringify([...folders].sort())
     );
   });
@@ -558,6 +562,7 @@ const executeHistorySearch = async (item) => {
   setMode(item.mode);
   rangeInput.value = item.range_limit || 0;
   spaceModeSelect.value = item.space_mode || 'jp';
+  normalizeModeSelect.value = item.normalize_mode || 'exact';
 
   // Restore folder selection
   state.selected = new Set(item.folders);
@@ -582,6 +587,10 @@ const renderHistoryList = () => {
       'jp': '和文のみ',
       'all': 'すべて'
     }[item.space_mode] || item.space_mode;
+    const normalizeLabel = {
+      'exact': '完全一致',
+      'normalized': 'NFKC+casefold'
+    }[item.normalize_mode || 'exact'] || (item.normalize_mode || 'exact');
 
     return `
       <div class="history-item ${item.pinned ? 'pinned' : ''}" data-id="${item.id}">
@@ -604,6 +613,7 @@ const renderHistoryList = () => {
           <span class="chip">${item.mode}</span>
           ${item.range_limit > 0 ? `<span class="chip">範囲: ${item.range_limit}</span>` : ''}
           <span class="chip">空白: ${spaceModeLabel}</span>
+          <span class="chip">正規化: ${normalizeLabel}</span>
           <span class="chip">${item.result_count} 件</span>
           <span class="chip subtle">${formatTimestamp(item.timestamp)}</span>
         </div>
@@ -1094,14 +1104,17 @@ const runSearch = async (evt) => {
   const query = queryInput.value.trim();
   const rangeVal = parseInt(rangeInput.value || '0', 10);
   const spaceMode = spaceModeSelect?.value || 'none';
+  const normalizeMode = normalizeModeSelect?.value || 'exact';
   const payload = {
     query,
     mode: state.mode,
     range_limit: state.mode === 'AND' ? rangeVal : 0,
     space_mode: spaceMode,
+    normalize_mode: normalizeMode,
     folders: Array.from(state.selected),
   };
   state.spaceMode = spaceMode;
+  state.normalizeMode = normalizeMode;
 
   if (!payload.query) {
     alert('キーワードを入力してください');
@@ -1140,6 +1153,7 @@ const runSearch = async (evt) => {
       state.mode,
       rangeVal,
       spaceMode,
+      normalizeMode,
       payload.folders,
       data.count || 0,
       state.currentIndexUuid
@@ -1242,11 +1256,13 @@ if (exportBtn) {
     const query = queryInput.value.trim();
     const rangeVal = parseInt(rangeInput.value || '0', 10);
     const spaceMode = spaceModeSelect?.value || 'jp';
+    const normalizeMode = normalizeModeSelect?.value || 'exact';
     const payload = {
       query,
       mode: state.mode,
       range_limit: state.mode === 'AND' ? rangeVal : 0,
       space_mode: spaceMode,
+      normalize_mode: normalizeMode,
       folders: Array.from(state.selected),
     };
 
