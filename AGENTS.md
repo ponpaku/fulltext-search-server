@@ -1,5 +1,5 @@
 # System Overview
-System Version: 1.1.0  
+System Version: 1.1.1
 AGENTS File Version: 1.0.0
 - Stack: FastAPI backend with a static UI (`static/`) and in-memory search data.
 - Inputs: folders from `SEARCH_FOLDERS`; optional SMB path parsing and display aliases via `SEARCH_FOLDER_ALIASES`.
