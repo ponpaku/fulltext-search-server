@@ -1,9 +1,14 @@
 # 変更履歴
 
 System Version: 1.1.1
+File Version: 1.1.2
 
 ## 1.1.1
 
+- 2026-01-10: 機能追加: NFKC + casefold の正規化検索モードを追加（issue #6 対応）。
+  - `QUERY_NORMALIZE` / `INDEX_STORE_NORMALIZED` を追加
+  - 表記ゆれ吸収のため `normalize_mode=normalized` を追加
+  - 検索履歴とエクスポートに正規化モードを反映
 - 2026-01-09: 機能追加: UI改善 - クエリ履歴機能を実装（issue #7 対応）。
   - localStorage を使用した検索履歴の保存（上限50件）
   - ピン留め機能により重要な検索を保存可能

@@ -1,7 +1,7 @@
 # Full-Search-PDFs
 
 System Version: 1.1.1
-README File Version: 1.1.3
+README File Version: 1.1.4
 
 ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。
 UI は `static/` 配下で提供されます。
@@ -13,6 +13,7 @@ UI は `static/` 配下で提供されます。
 - PDF/DOCX/TXT/CSV/XLSX/XLS のテキスト抽出・検索
 - AND/OR + 文字数範囲指定（AND時）
 - 和文のみ空白除去（デフォルト）
+- 表記ゆれ吸収（NFKC + casefold の正規化モード）
 - 結果の無限スクロール（100件ずつレンダリング）
 - SMB/NAS の表示名置換（表示のみ）
 - SSL 起動（証明書を配置すれば自動）
@@ -105,6 +106,12 @@ CACHE_MEM_MAX_RESULT_KB=2000
 
 # 固定キャッシュの圧縮閾値（KB以上はgzip保存）
 CACHE_COMPRESS_MIN_KB=2000
+
+# クエリ正規化モード（off/nfkc_casefold）
+QUERY_NORMALIZE=off
+
+# インデックスに正規化済みテキストを保持（0/1）
+INDEX_STORE_NORMALIZED=1
 
 # インデックス再構築スケジュール（例: 03:00 or 12h）
 REBUILD_SCHEDULE="03:00"
