@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.1"
-# File Version: 1.3.7
+# File Version: 1.3.8
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -1963,6 +1963,18 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
     }
     elapsed = time.time() - start_time
     log_info(f"インデックス構築完了: {folder} 件数={stats['indexed_files']} 時間={elapsed:.1f}s")
+
+    # 失敗情報のログ出力（運用把握のため）
+    if failures:
+        log_warn(f"インデックス失敗ファイル: {folder} 失敗件数={len(failures)}")
+        # 詳細は SEARCH_DEBUG=1 の時のみ（大量ログ対策）
+        debug_mode = os.getenv("SEARCH_DEBUG", "").strip().lower() in {"1", "true", "yes"}
+        if debug_mode:
+            for i, (path, reason) in enumerate(list(failures.items())[:5], 1):
+                log_warn(f"  [{i}] {path}: {reason}")
+            if len(failures) > 5:
+                log_warn(f"  ... 他 {len(failures) - 5} 件")
+
     return valid_cache, stats, failures
 
 
