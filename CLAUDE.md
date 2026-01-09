@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-System Version: 1.1.0
+System Version: 1.1.1
 CLAUDE File Version: 1.0.0
 
 ## 1. Project Context

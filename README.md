@@ -1,6 +1,6 @@
 # Full-Search-PDFs
 
-System Version: 1.1.0
+System Version: 1.1.1
 README File Version: 1.1.2
 
 ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。

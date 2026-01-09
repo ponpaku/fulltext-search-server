@@ -21,8 +21,8 @@ from typing import Dict, List, Tuple
 
 from dotenv import load_dotenv
 
-SYSTEM_VERSION = "1.1.0"
-# File Version: 1.3.6
+SYSTEM_VERSION = "1.1.1"
+# File Version: 1.3.7
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -2727,8 +2727,18 @@ def write_fixed_cache_payload(key: str, payload: Dict, compress: bool) -> Path |
 
 
 def prune_cache_dir(valid_keys: set[str]) -> None:
+    """
+    無効なキャッシュファイルを削除する。
+    メタデータファイル（fixed_cache_index.json, query_stats.json）は保護される。
+    """
+    # メタデータファイルを除外（削除対象外）
+    metadata_files = {"fixed_cache_index", "query_stats"}
     for file in CACHE_DIR.glob("*.json*"):
         stem = file.name.split(".")[0]
+        # メタデータファイルは保護
+        if stem in metadata_files:
+            continue
+        # 有効なキャッシュキーでなければ削除
         if stem not in valid_keys:
             try:
                 file.unlink()
