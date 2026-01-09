@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
  * System Version: 1.1.1
- * File Version: 1.1.8
+ * File Version: 1.1.9
  */
 
 const state = {
@@ -151,7 +151,7 @@ const toggleTheme = () => {
 // ═══════════════════════════════════════════════════════════════
 
 const HISTORY_STORAGE_KEY = 'searchQueryHistory';
-const HISTORY_MAX_ITEMS = 50;
+const HISTORY_MAX_ITEMS = 30;
 
 const loadQueryHistory = () => {
   try {
@@ -500,11 +500,13 @@ fileModalClose.addEventListener('click', closeFileModal);
 // ═══════════════════════════════════════════════════════════════
 
 const closeHelpModal = () => {
+  helpToggle?.focus();
   helpModal.classList.remove('open');
   helpModal.setAttribute('aria-hidden', 'true');
 };
 
 const openHelpModal = () => {
+  helpToggle?.blur();
   helpModal.classList.add('open');
   helpModal.setAttribute('aria-hidden', 'false');
 };
@@ -520,11 +522,13 @@ helpModalClose.addEventListener('click', closeHelpModal);
 // ═══════════════════════════════════════════════════════════════
 
 const closeHistoryModal = () => {
+  historyToggle?.focus();
   historyModal.classList.remove('open');
   historyModal.setAttribute('aria-hidden', 'true');
 };
 
 const openHistoryModal = () => {
+  historyToggle?.blur();
   historyModal.classList.add('open');
   historyModal.setAttribute('aria-hidden', 'false');
   renderHistoryList();

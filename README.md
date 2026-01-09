@@ -1,7 +1,7 @@
 # Full-Search-PDFs
 
 System Version: 1.1.1
-README File Version: 1.1.2
+README File Version: 1.1.3
 
 ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。
 UI は `static/` 配下で提供されます。
@@ -35,6 +35,13 @@ python web_server.py
 chmod +x run.sh
 ./run.sh
 ```
+
+## 使い方（UI）
+- 検索: キーワード入力 → 対象フォルダ選択 → 検索ボタン
+- 絞り込み: 検索結果の「絞り込み」からフォルダ/ファイル形式でローカル絞り込み
+  - フィルタ未選択は全件表示
+- 検索履歴: 右上の履歴アイコンから表示（最大30件、ピン留め可）
+- CSV出力: 検索結果がある時のみ「CSV」ボタンが表示
 
 ## NAS/共有フォルダ利用時の注意
 - 事前にOS側で共有フォルダを認証・マウントしてから起動してください。
