@@ -1,11 +1,36 @@
 # 変更履歴
 
-System Version: 1.1.3
+System Version: 1.1.5
+
+## 1.1.5
+
+- 2026-01-10: 仕様変更: 厳格検索を「最小整形」に変更。
+  - 改行/不可視のみ整える `norm_strict` を追加
+  - 厳格は `norm_strict`、ゆらぎ吸収は `norm_cf` を使用
+  - UIの表記を「厳格（最小整形）」に更新
+  - System Version 表記を 1.1.5 に統一
+
+## 1.1.4
+
+- 2026-01-10: 仕様変更: 表記ゆれの既定を「ゆらぎ吸収」に変更。
+  - `normalize_mode` のデフォルトを `normalized` に変更
+  - UIの既定選択を「ゆらぎ吸収（推奨）」に変更
+  - 設定例で `QUERY_NORMALIZE=nfkc_casefold` を推奨
+  - System Version 表記を 1.1.4 に統一
+- 2026-01-10: ドキュメント/表示調整: 表記ゆれの既定方針を明文化。
+  - `.env.example.txt` の注記を「デフォルト方針」に変更
+  - 履歴表示のフォールバックを「厳格」に統一
 
 ## 1.1.3
 
 - 2026-01-10: 改善: 正規化モードは `INDEX_STORE_NORMALIZED=1` の場合のみ有効化するように調整。
   - 無効時は `exact` へフォールバックし、警告ログを出力
+- 2026-01-10: ドキュメント/仕様整理: 正規化設定の説明を追加し、normalize_mode の既定値を明確化。
+  - README に `QUERY_NORMALIZE` / `INDEX_STORE_NORMALIZED` を追記
+  - `normalize_mode` のデフォルトを `exact` に統一
+- 2026-01-10: UI文言: 表記ゆれの説明をユーザー向けに分かりやすく調整。
+  - UIのラベル/履歴表示を「表記ゆれ」に統一
+  - 手法（NFKC+casefold）は使い方に補足として明記
 
 ## 1.1.2
 

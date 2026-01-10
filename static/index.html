@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <!-- System Version: 1.1.2 | File Version: 1.1.7 -->
+  <!-- System Version: 1.1.5 | File Version: 1.2.1 -->
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>フォルダ内テキスト検索</title>
@@ -113,12 +113,12 @@
               <span class="hint">検索にのみ適用</span>
             </div>
             <div class="form-group compact">
-              <label for="normalizeMode">正規化</label>
+              <label for="normalizeMode">表記ゆれ</label>
               <select id="normalizeMode" class="input-sm select-sm">
-                <option value="exact" selected>完全一致</option>
-                <option value="normalized">NFKC+casefold</option>
+                <option value="normalized" selected>ゆらぎを吸収（推奨）</option>
+                <option value="exact">厳格（最小整形）</option>
               </select>
-              <span class="hint">表記ゆれを吸収</span>
+              <span class="hint">大文字/小文字・全角/半角など</span>
             </div>
           </div>
 
@@ -278,6 +278,11 @@
         <section>
           <h4>検索履歴</h4>
           <p>「履歴」ボタンから過去の検索を再実行できます（最大30件）。ピン留めで重要な検索を保存できます。</p>
+        </section>
+        <section>
+          <h4>表記ゆれ（補足）</h4>
+          <p>既定は「ゆらぎを吸収」です。厳格は表記の違いを区別し、改行/不可視のみ整えます。</p>
+          <p>ゆらぎを吸収は NFKC + casefold の正規化を使っています（大小/全半角などを揃えます）。</p>
         </section>
       </div>
     </div>

@@ -21,8 +21,8 @@ from typing import Dict, List, Tuple
 
 from dotenv import load_dotenv
 
-SYSTEM_VERSION = "1.1.3"
-# File Version: 1.6.1
+SYSTEM_VERSION = "1.1.5"
+# File Version: 1.6.6
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -126,6 +126,17 @@ def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = normalize_invisible_separators(text)
     text = text.lower()
+    text = re.sub(r"[\n\t\r]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def normalize_text_minimal(text: str) -> str:
+    """改行/不可視の最小整形のみ行う."""
+    if not text:
+        return ""
+    text = strip_cid(text)
+    text = normalize_invisible_separators(text)
     text = re.sub(r"[\n\t\r]", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text
@@ -651,11 +662,11 @@ def search_text_logic(
             norm_text = entry.get("norm_cf") or entry["norm"]
     else:
         if space_mode == "all":
-            norm_text = entry["norm_all"]
+            norm_text = entry.get("norm_strict_all") or entry["norm_all"]
         elif space_mode == "jp":
-            norm_text = entry["norm_jp"]
+            norm_text = entry.get("norm_strict_jp") or entry["norm_jp"]
         else:
-            norm_text = entry["norm"]
+            norm_text = entry.get("norm_strict") or entry["norm"]
     is_match = False
     match_pos = -1
 
@@ -756,7 +767,7 @@ def search_entries_chunk(
 
 def build_query_groups(query: str, space_mode: str, normalize_mode: str) -> Tuple[List[str], List[List[str]]]:
     keywords = [k for k in (query or "").split() if k.strip()]
-    normalizer = normalize_text_nfkc_casefold if normalize_mode == "normalized" else normalize_text
+    normalizer = normalize_text_nfkc_casefold if normalize_mode == "normalized" else normalize_text_minimal
     norm_keyword_groups = [
         [apply_space_mode(normalizer(k).strip(), space_mode)]
         for k in keywords
@@ -828,14 +839,14 @@ def search_text_logic_shared(
             norm_len = entry.get("norm_cf_len", entry["norm_len"])
     else:
         if space_mode == "all":
-            norm_start = entry["norm_all_off"]
-            norm_len = entry["norm_all_len"]
+            norm_start = entry.get("norm_strict_all_off", entry["norm_all_off"])
+            norm_len = entry.get("norm_strict_all_len", entry["norm_all_len"])
         elif space_mode == "jp":
-            norm_start = entry["norm_jp_off"]
-            norm_len = entry["norm_jp_len"]
+            norm_start = entry.get("norm_strict_jp_off", entry["norm_jp_off"])
+            norm_len = entry.get("norm_strict_jp_len", entry["norm_jp_len"])
         else:
-            norm_start = entry["norm_off"]
-            norm_len = entry["norm_len"]
+            norm_start = entry.get("norm_strict_off", entry["norm_off"])
+            norm_len = entry.get("norm_strict_len", entry["norm_len"])
     norm_end = norm_start + norm_len
 
     is_match = False
@@ -2044,6 +2055,7 @@ def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict])
             if not raw_text:
                 continue
             norm_base = normalize_text(raw_text)
+            norm_strict = normalize_text_minimal(raw_text)
             norm_cf_base = (
                 normalize_text_nfkc_casefold(raw_text) if store_normalized else ""
             )
@@ -2057,6 +2069,9 @@ def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict])
                 "norm": norm_base,
                 "norm_jp": apply_space_mode(norm_base, "jp"),
                 "norm_all": apply_space_mode(norm_base, "all"),
+                "norm_strict": norm_strict,
+                "norm_strict_jp": apply_space_mode(norm_strict, "jp"),
+                "norm_strict_all": apply_space_mode(norm_strict, "all"),
                 "folderId": folder_id,
                 "folderName": folder_name,
             }
@@ -2081,6 +2096,9 @@ def build_shared_blob(shared_path: Path, entries: List[Dict]) -> List[Dict]:
         norm_b = encode_norm_text(entry["norm"])
         norm_jp_b = encode_norm_text(entry["norm_jp"])
         norm_all_b = encode_norm_text(entry["norm_all"])
+        norm_strict_b = encode_norm_text(entry.get("norm_strict", ""))
+        norm_strict_jp_b = encode_norm_text(entry.get("norm_strict_jp", ""))
+        norm_strict_all_b = encode_norm_text(entry.get("norm_strict_all", ""))
         norm_cf_b = encode_norm_text(entry.get("norm_cf", "")) if store_normalized else b""
         norm_cf_jp_b = encode_norm_text(entry.get("norm_cf_jp", "")) if store_normalized else b""
         norm_cf_all_b = encode_norm_text(entry.get("norm_cf_all", "")) if store_normalized else b""
@@ -2099,18 +2117,34 @@ def build_shared_blob(shared_path: Path, entries: List[Dict]) -> List[Dict]:
             "norm_jp_len": len(norm_jp_b),
             "norm_all_off": total_size + len(raw_b) + len(norm_b) + len(norm_jp_b),
             "norm_all_len": len(norm_all_b),
+            "norm_strict_off": total_size + len(raw_b) + len(norm_b) + len(norm_jp_b) + len(norm_all_b),
+            "norm_strict_len": len(norm_strict_b),
+            "norm_strict_jp_off": total_size + len(raw_b) + len(norm_b) + len(norm_jp_b) + len(norm_all_b) + len(norm_strict_b),
+            "norm_strict_jp_len": len(norm_strict_jp_b),
+            "norm_strict_all_off": total_size + len(raw_b) + len(norm_b) + len(norm_jp_b) + len(norm_all_b) + len(norm_strict_b) + len(norm_strict_jp_b),
+            "norm_strict_all_len": len(norm_strict_all_b),
         }
         extra_size = 0
         if store_normalized:
             entry_offsets.update(
                 {
-                    "norm_cf_off": total_size + len(raw_b) + len(norm_b) + len(norm_jp_b) + len(norm_all_b),
+                    "norm_cf_off": total_size
+                    + len(raw_b)
+                    + len(norm_b)
+                    + len(norm_jp_b)
+                    + len(norm_all_b)
+                    + len(norm_strict_b)
+                    + len(norm_strict_jp_b)
+                    + len(norm_strict_all_b),
                     "norm_cf_len": len(norm_cf_b),
                     "norm_cf_jp_off": total_size
                     + len(raw_b)
                     + len(norm_b)
                     + len(norm_jp_b)
                     + len(norm_all_b)
+                    + len(norm_strict_b)
+                    + len(norm_strict_jp_b)
+                    + len(norm_strict_all_b)
                     + len(norm_cf_b),
                     "norm_cf_jp_len": len(norm_cf_jp_b),
                     "norm_cf_all_off": total_size
@@ -2118,6 +2152,9 @@ def build_shared_blob(shared_path: Path, entries: List[Dict]) -> List[Dict]:
                     + len(norm_b)
                     + len(norm_jp_b)
                     + len(norm_all_b)
+                    + len(norm_strict_b)
+                    + len(norm_strict_jp_b)
+                    + len(norm_strict_all_b)
                     + len(norm_cf_b)
                     + len(norm_cf_jp_b),
                     "norm_cf_all_len": len(norm_cf_all_b),
@@ -2127,7 +2164,16 @@ def build_shared_blob(shared_path: Path, entries: List[Dict]) -> List[Dict]:
         offsets.append(
             entry_offsets
         )
-        total_size += len(raw_b) + len(norm_b) + len(norm_jp_b) + len(norm_all_b) + extra_size
+        total_size += (
+            len(raw_b)
+            + len(norm_b)
+            + len(norm_jp_b)
+            + len(norm_all_b)
+            + len(norm_strict_b)
+            + len(norm_strict_jp_b)
+            + len(norm_strict_all_b)
+            + extra_size
+        )
 
     with open(shared_path, "wb") as f:
         f.truncate(total_size)
@@ -2136,6 +2182,9 @@ def build_shared_blob(shared_path: Path, entries: List[Dict]) -> List[Dict]:
             f.write(encode_norm_text(entry["norm"]))
             f.write(encode_norm_text(entry["norm_jp"]))
             f.write(encode_norm_text(entry["norm_all"]))
+            f.write(encode_norm_text(entry.get("norm_strict", "")))
+            f.write(encode_norm_text(entry.get("norm_strict_jp", "")))
+            f.write(encode_norm_text(entry.get("norm_strict_all", "")))
             if store_normalized:
                 f.write(encode_norm_text(entry.get("norm_cf", "")))
                 f.write(encode_norm_text(entry.get("norm_cf_jp", "")))
@@ -2194,7 +2243,6 @@ class SearchRequest(BaseModel):
         if mode not in {"exact", "normalized"}:
             raise ValueError("normalize_mode は exact または normalized を指定してください")
         return mode
-
 
 # --- グローバル状態 ---
 app = FastAPI(title="Preloaded Folder Search")
@@ -2648,7 +2696,7 @@ def resolve_normalize_mode(value: str | None) -> str:
                     normalize_mode_warning_emitted = True
                 return "exact"
             return normalized
-    env_value = os.getenv("QUERY_NORMALIZE", "off").strip().lower()
+    env_value = os.getenv("QUERY_NORMALIZE", "nfkc_casefold").strip().lower()
     if env_value == "nfkc_casefold":
         if store_normalized:
             return "normalized"
@@ -3669,7 +3717,7 @@ async def export_results(req: SearchRequest, format: str = "csv"):
         writer.writerow(["# モード", req.mode])
         writer.writerow(["# 範囲", req.range_limit])
         writer.writerow(["# 空白除去", req.space_mode])
-        writer.writerow(["# 正規化", normalize_mode])
+        writer.writerow(["# 表記ゆれ", normalize_mode])
         writer.writerow(["# インデックスUUID", index_uuid])
         writer.writerow(["# エクスポート日時", metadata["exported_at"]])
         writer.writerow(["# 検索フォルダ", ", ".join(metadata["folder_names"])])

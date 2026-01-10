@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.2
- * File Version: 1.2.0
+ * System Version: 1.1.5
+ * File Version: 1.2.4
  */
 
 const state = {
@@ -18,7 +18,7 @@ const state = {
   renderedCount: 0,
   groupedResults: null,
   isRenderingBatch: false,
-  normalizeMode: 'exact',
+  normalizeMode: 'normalized',
   fileModalFolderId: null,
   fileModalFolderName: '',
   fileModalScope: 'indexed',
@@ -588,9 +588,9 @@ const renderHistoryList = () => {
       'all': 'すべて'
     }[item.space_mode] || item.space_mode;
     const normalizeLabel = {
-      'exact': '完全一致',
-      'normalized': 'NFKC+casefold'
-    }[item.normalize_mode || 'exact'] || (item.normalize_mode || 'exact');
+      'exact': '厳格',
+      'normalized': 'ゆらぎ吸収'
+    }[item.normalize_mode] || '厳格';
 
     return `
       <div class="history-item ${item.pinned ? 'pinned' : ''}" data-id="${item.id}">
@@ -613,7 +613,7 @@ const renderHistoryList = () => {
           <span class="chip">${item.mode}</span>
           ${item.range_limit > 0 ? `<span class="chip">範囲: ${item.range_limit}</span>` : ''}
           <span class="chip">空白: ${spaceModeLabel}</span>
-          <span class="chip">正規化: ${normalizeLabel}</span>
+          <span class="chip">表記ゆれ: ${normalizeLabel}</span>
           <span class="chip">${item.result_count} 件</span>
           <span class="chip subtle">${formatTimestamp(item.timestamp)}</span>
         </div>
@@ -1104,7 +1104,7 @@ const runSearch = async (evt) => {
   const query = queryInput.value.trim();
   const rangeVal = parseInt(rangeInput.value || '0', 10);
   const spaceMode = spaceModeSelect?.value || 'none';
-  const normalizeMode = normalizeModeSelect?.value || 'exact';
+  const normalizeMode = normalizeModeSelect?.value || 'normalized';
   const payload = {
     query,
     mode: state.mode,
@@ -1256,7 +1256,7 @@ if (exportBtn) {
     const query = queryInput.value.trim();
     const rangeVal = parseInt(rangeInput.value || '0', 10);
     const spaceMode = spaceModeSelect?.value || 'jp';
-    const normalizeMode = normalizeModeSelect?.value || 'exact';
+    const normalizeMode = normalizeModeSelect?.value || 'normalized';
     const payload = {
       query,
       mode: state.mode,
