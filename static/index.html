@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <!-- System Version: 1.0.0 | File Version: 1.0.0 -->
+  <!-- System Version: 1.1.6 | File Version: 1.2.3 -->
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>フォルダ内テキスト検索</title>
@@ -46,15 +46,24 @@
       <div class="panel">
         <div class="panel-header">
           <h2>検索設定</h2>
-          <button type="button" class="chip-btn" id="refreshFolders" title="フォルダ再読込">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-              <path d="M3 3v5h5"/>
-              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
-              <path d="M16 21h5v-5"/>
-            </svg>
-            再読込
-          </button>
+          <div style="display: flex; gap: 6px;">
+            <button type="button" class="chip-btn" id="historyToggle" title="検索履歴">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M12 6v6l4 2"/>
+              </svg>
+              履歴
+            </button>
+            <button type="button" class="chip-btn" id="refreshFolders" title="フォルダ再読込">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                <path d="M3 3v5h5"/>
+                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+                <path d="M16 21h5v-5"/>
+              </svg>
+              再読込
+            </button>
+          </div>
         </div>
 
         <form id="searchForm" class="search-form">
@@ -103,6 +112,14 @@
               </select>
               <span class="hint">検索にのみ適用</span>
             </div>
+            <div class="form-group compact">
+              <label for="normalizeMode">表記ゆれ</label>
+              <select id="normalizeMode" class="input-sm select-sm">
+                <option value="normalized" selected>ゆらぎを吸収（推奨）</option>
+                <option value="exact">厳格（最小整形）</option>
+              </select>
+              <span class="hint">大文字/小文字・全角/半角など</span>
+            </div>
           </div>
 
           <!-- Folder Selection -->
@@ -143,11 +160,50 @@
             <h2>検索結果</h2>
             <span class="result-count" id="resultCount">0 件</span>
           </div>
-          <div class="toggle-group compact" id="viewToggle" title="表示切替">
-            <button type="button" class="toggle-btn active" data-view="hit">ヒット単位</button>
-            <button type="button" class="toggle-btn" data-view="file">ファイル単位</button>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <button type="button" class="chip-btn" id="filterBtn" title="結果内フィルタ">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 4h18M6 12h12M10 20h4"/>
+              </svg>
+              絞り込み
+            </button>
+            <button type="button" class="chip-btn" id="exportBtn" title="エクスポート" style="display: none;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              CSV
+            </button>
+            <div class="toggle-group compact" id="viewToggle" title="表示切替">
+              <button type="button" class="toggle-btn active" data-view="hit">ヒット単位</button>
+              <button type="button" class="toggle-btn" data-view="file">ファイル単位</button>
+            </div>
           </div>
         </div>
+        <div id="filterPanel" class="filter-panel" style="display: none;">
+          <div class="filter-header">
+            <h3>結果内フィルタ</h3>
+            <button type="button" class="text-btn" id="closeFilter">閉じる</button>
+          </div>
+          <div class="filter-content">
+            <div class="filter-grid">
+              <div class="filter-group">
+                <div class="filter-title">フォルダ</div>
+                <div class="filter-list" id="filterFolders"></div>
+              </div>
+              <div class="filter-group">
+                <div class="filter-title">ファイル形式</div>
+                <div class="filter-list" id="filterExtensions"></div>
+              </div>
+            </div>
+          </div>
+          <div class="filter-actions">
+            <button type="button" class="btn btn-secondary" id="clearFilter">クリア</button>
+            <button type="button" class="btn btn-primary" id="applyFilter">適用</button>
+          </div>
+        </div>
+        <div id="noticeBar" class="notice-bar" role="status" aria-live="polite" style="display: none;"></div>
         <div class="results-container" id="results">
           <div class="empty-state">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -209,13 +265,51 @@
           <p>結果のファイルパスをコピーできます。エクスプローラーのアドレス欄に貼り付けてEnterを押すと、対象ファイルを直接開けます。</p>
         </section>
         <section>
+          <h4>結果内の絞り込み</h4>
+          <p>検索結果の右上「絞り込み」から、フォルダ/ファイル形式で結果を絞れます。フィルタ未選択は全件表示です。</p>
+        </section>
+        <section>
+          <h4>CSV出力</h4>
+          <p>検索結果があると「CSV」ボタンが表示されます。クリックすると結果をCSVで保存できます。</p>
+        </section>
+        <section>
           <h4>テーマ切り替え</h4>
           <p>右上の太陽/月アイコンでライト/ダークを切り替えられます。</p>
+        </section>
+        <section>
+          <h4>検索履歴</h4>
+          <p>「履歴」ボタンから過去の検索を再実行できます（最大30件）。ピン留めで重要な検索を保存できます。</p>
+        </section>
+        <section>
+          <h4>表記ゆれ（補足）</h4>
+          <p>既定は「ゆらぎを吸収」です。厳格は表記の違いを区別し、改行/不可視のみ整えます。</p>
+          <p>ゆらぎを吸収は NFKC + casefold の正規化を使っています（大小/全半角などを揃えます）。</p>
         </section>
       </div>
     </div>
   </div>
 
-  <script src="/static/app.js?v=4"></script>
+  <div class="modal-backdrop" id="historyModal" aria-hidden="true">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>検索履歴</h3>
+        <div style="display: flex; gap: 6px;">
+          <button type="button" class="chip-btn" id="clearHistoryBtn" title="ピン留め以外を削除">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+            クリア
+          </button>
+          <button type="button" class="modal-close" id="historyModalClose" aria-label="閉じる">×</button>
+        </div>
+      </div>
+      <div class="modal-body" id="historyListContent">
+        <div class="loading-placeholder">履歴がありません</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>

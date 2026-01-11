@@ -21,13 +21,14 @@ from typing import Dict, List, Tuple
 
 from dotenv import load_dotenv
 
-SYSTEM_VERSION = "1.1.1"
-# File Version: 1.3.8
+SYSTEM_VERSION = "1.1.6"
+# File Version: 1.6.9
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+import io
 try:
     from colorama import Fore, Style, init as colorama_init
 except Exception:
@@ -127,6 +128,31 @@ def normalize_text(text: str) -> str:
     text = text.lower()
     text = re.sub(r"[\n\t\r]", " ", text)
     text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def normalize_text_minimal(text: str) -> str:
+    """改行/不可視の最小整形のみ行う."""
+    if not text:
+        return ""
+    text = strip_cid(text)
+    text = normalize_invisible_separators(text)
+    text = re.sub(r"[\n\t\r]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def normalize_text_nfkc_casefold(text: str, compress_spaces: bool = True) -> str:
+    """NFKC + casefold の正規化."""
+    if not text:
+        return ""
+    text = strip_cid(text)
+    text = unicodedata.normalize("NFKC", text)
+    text = normalize_invisible_separators(text)
+    text = text.casefold()
+    text = re.sub(r"[\n\t\r]", " ", text)
+    if compress_spaces:
+        text = re.sub(r"\s+", " ", text)
     return text
 
 
@@ -620,18 +646,27 @@ def search_text_logic(
     search_mode: str,
     range_limit: int,
     space_mode: str,
+    normalize_mode: str,
 ) -> List[Dict]:
     if not norm_keyword_groups:
         return []
 
     raw_text = entry["raw"]
     raw_for_positions = normalize_invisible_separators(raw_text)
-    if space_mode == "all":
-        norm_text = entry["norm_all"]
-    elif space_mode == "jp":
-        norm_text = entry["norm_jp"]
+    if normalize_mode == "normalized":
+        if space_mode == "all":
+            norm_text = entry.get("norm_cf_all") or entry["norm_all"]
+        elif space_mode == "jp":
+            norm_text = entry.get("norm_cf_jp") or entry["norm_jp"]
+        else:
+            norm_text = entry.get("norm_cf") or entry["norm"]
     else:
-        norm_text = entry["norm"]
+        if space_mode == "all":
+            norm_text = entry.get("norm_strict_all") or entry["norm_all"]
+        elif space_mode == "jp":
+            norm_text = entry.get("norm_strict_jp") or entry["norm_jp"]
+        else:
+            norm_text = entry.get("norm_strict") or entry["norm"]
     is_match = False
     match_pos = -1
 
@@ -712,6 +747,7 @@ def search_entries_chunk(
     search_mode: str,
     range_limit: int,
     space_mode: str,
+    normalize_mode: str,
 ) -> List[Dict]:
     chunk_results: List[Dict] = []
     for entry in entries:
@@ -722,20 +758,24 @@ def search_entries_chunk(
             search_mode,
             range_limit,
             space_mode,
+            normalize_mode,
         )
         if hit:
             chunk_results.extend(hit)
     return chunk_results
 
 
-def build_query_groups(query: str, space_mode: str) -> Tuple[List[str], List[List[str]]]:
+def build_query_groups(query: str, space_mode: str, normalize_mode: str) -> Tuple[List[str], List[List[str]]]:
     keywords = [k for k in (query or "").split() if k.strip()]
+    normalizer = normalize_text_nfkc_casefold if normalize_mode == "normalized" else normalize_text_minimal
     norm_keyword_groups = [
-        [apply_space_mode(normalize_text(k).strip(), space_mode)]
+        [apply_space_mode(normalizer(k).strip(), space_mode)]
         for k in keywords
         if k.strip()
     ]
     return keywords, norm_keyword_groups
+
+
 
 
 def check_range_match(norm_text: str, norm_keyword_groups: List[List[str]], range_limit: int) -> bool:
@@ -782,19 +822,31 @@ def search_text_logic_shared(
     search_mode: str,
     range_limit: int,
     space_mode: str,
+    normalize_mode: str,
 ) -> List[Dict]:
     if not norm_keyword_groups_bytes:
         return []
 
-    if space_mode == "all":
-        norm_start = entry["norm_all_off"]
-        norm_len = entry["norm_all_len"]
-    elif space_mode == "jp":
-        norm_start = entry["norm_jp_off"]
-        norm_len = entry["norm_jp_len"]
+    if normalize_mode == "normalized":
+        if space_mode == "all":
+            norm_start = entry.get("norm_cf_all_off", entry["norm_all_off"])
+            norm_len = entry.get("norm_cf_all_len", entry["norm_all_len"])
+        elif space_mode == "jp":
+            norm_start = entry.get("norm_cf_jp_off", entry["norm_jp_off"])
+            norm_len = entry.get("norm_cf_jp_len", entry["norm_jp_len"])
+        else:
+            norm_start = entry.get("norm_cf_off", entry["norm_off"])
+            norm_len = entry.get("norm_cf_len", entry["norm_len"])
     else:
-        norm_start = entry["norm_off"]
-        norm_len = entry["norm_len"]
+        if space_mode == "all":
+            norm_start = entry.get("norm_strict_all_off", entry["norm_all_off"])
+            norm_len = entry.get("norm_strict_all_len", entry["norm_all_len"])
+        elif space_mode == "jp":
+            norm_start = entry.get("norm_strict_jp_off", entry["norm_jp_off"])
+            norm_len = entry.get("norm_strict_jp_len", entry["norm_jp_len"])
+        else:
+            norm_start = entry.get("norm_strict_off", entry["norm_off"])
+            norm_len = entry.get("norm_strict_len", entry["norm_len"])
     norm_end = norm_start + norm_len
 
     is_match = False
@@ -844,6 +896,7 @@ def search_entries_chunk_shared(
     search_mode: str,
     range_limit: int,
     space_mode: str,
+    normalize_mode: str,
 ) -> List[Dict]:
     chunk_results: List[Dict] = []
     for entry in entries:
@@ -856,6 +909,7 @@ def search_entries_chunk_shared(
             search_mode,
             range_limit,
             space_mode,
+            normalize_mode,
         )
         if hit:
             chunk_results.extend(hit)
@@ -901,6 +955,7 @@ def perform_search(
                         params.mode,
                         params.range_limit,
                         params.space_mode,
+                        params.normalize_mode,
                     )
                     for chunk in chunks
                 ]
@@ -919,6 +974,7 @@ def perform_search(
                 params.mode,
                 params.range_limit,
                 params.space_mode,
+                params.normalize_mode,
             )
         if os.getenv("SEARCH_DEBUG", "").strip().lower() in {"1", "true", "yes"}:
             log_info(
@@ -1025,6 +1081,7 @@ def perform_search_process(
                         params.mode,
                         params.range_limit,
                         params.space_mode,
+                        params.normalize_mode,
                     )
                     for chunk in chunks
                 ]
@@ -1043,6 +1100,7 @@ def perform_search_process(
                 params.mode,
                 params.range_limit,
                 params.space_mode,
+                params.normalize_mode,
             )
         return folder_results
 
@@ -1094,6 +1152,7 @@ def perform_search_process_shared(
                         params.mode,
                         params.range_limit,
                         params.space_mode,
+                        params.normalize_mode,
                     )
                     for chunk in chunks
                 ]
@@ -1114,6 +1173,7 @@ def perform_search_process_shared(
                 params.mode,
                 params.range_limit,
                 params.space_mode,
+                params.normalize_mode,
             )
         return folder_results
 
@@ -1132,7 +1192,11 @@ def run_search_direct(
     params: "SearchParams",
     target_ids: List[str],
 ) -> Tuple[List[Dict], List[str]]:
-    raw_keywords, norm_keyword_groups = build_query_groups(query, params.space_mode)
+    raw_keywords, norm_keyword_groups = build_query_groups(
+        query,
+        params.space_mode,
+        params.normalize_mode,
+    )
     worker_count = search_worker_count
     if search_execution_mode == "process" and search_executor:
         future = search_executor.submit(
@@ -2037,6 +2101,7 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
 
 
 def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict]) -> List[Dict]:
+    store_normalized = env_bool("INDEX_STORE_NORMALIZED", True)
     pages: List[Dict] = []
     for path, meta in cache.items():
         file_name = os.path.basename(path)
@@ -2048,25 +2113,40 @@ def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict])
             if not raw_text:
                 continue
             norm_base = normalize_text(raw_text)
-            page_display = "-" if not (is_pdf or is_excel) else page_num
-            pages.append(
-                {
-                    "file": file_name,
-                    "path": path,
-                    "displayPath": display_path,
-                    "page": page_display,
-                    "raw": raw_text,
-                    "norm": norm_base,
-                    "norm_jp": apply_space_mode(norm_base, "jp"),
-                    "norm_all": apply_space_mode(norm_base, "all"),
-                    "folderId": folder_id,
-                    "folderName": folder_name,
-                }
+            norm_strict = normalize_text_minimal(raw_text)
+            norm_cf_base = (
+                normalize_text_nfkc_casefold(raw_text) if store_normalized else ""
             )
+            page_display = "-" if not (is_pdf or is_excel) else page_num
+            entry = {
+                "file": file_name,
+                "path": path,
+                "displayPath": display_path,
+                "page": page_display,
+                "raw": raw_text,
+                "norm": norm_base,
+                "norm_jp": apply_space_mode(norm_base, "jp"),
+                "norm_all": apply_space_mode(norm_base, "all"),
+                "norm_strict": norm_strict,
+                "norm_strict_jp": apply_space_mode(norm_strict, "jp"),
+                "norm_strict_all": apply_space_mode(norm_strict, "all"),
+                "folderId": folder_id,
+                "folderName": folder_name,
+            }
+            if store_normalized:
+                entry.update(
+                    {
+                        "norm_cf": norm_cf_base,
+                        "norm_cf_jp": apply_space_mode(norm_cf_base, "jp"),
+                        "norm_cf_all": apply_space_mode(norm_cf_base, "all"),
+                    }
+                )
+            pages.append(entry)
     return pages
 
 
 def build_shared_blob(shared_path: Path, entries: List[Dict]) -> List[Dict]:
+    store_normalized = env_bool("INDEX_STORE_NORMALIZED", True)
     offsets: List[Dict] = []
     total_size = 0
     for entry in entries:
@@ -2074,25 +2154,84 @@ def build_shared_blob(shared_path: Path, entries: List[Dict]) -> List[Dict]:
         norm_b = encode_norm_text(entry["norm"])
         norm_jp_b = encode_norm_text(entry["norm_jp"])
         norm_all_b = encode_norm_text(entry["norm_all"])
+        norm_strict_b = encode_norm_text(entry.get("norm_strict", ""))
+        norm_strict_jp_b = encode_norm_text(entry.get("norm_strict_jp", ""))
+        norm_strict_all_b = encode_norm_text(entry.get("norm_strict_all", ""))
+        norm_cf_b = encode_norm_text(entry.get("norm_cf", "")) if store_normalized else b""
+        norm_cf_jp_b = encode_norm_text(entry.get("norm_cf_jp", "")) if store_normalized else b""
+        norm_cf_all_b = encode_norm_text(entry.get("norm_cf_all", "")) if store_normalized else b""
+        entry_offsets = {
+            "file": entry["file"],
+            "path": entry["path"],
+            "displayPath": entry["displayPath"],
+            "page": entry["page"],
+            "folderId": entry["folderId"],
+            "folderName": entry["folderName"],
+            "raw_off": total_size,
+            "raw_len": len(raw_b),
+            "norm_off": total_size + len(raw_b),
+            "norm_len": len(norm_b),
+            "norm_jp_off": total_size + len(raw_b) + len(norm_b),
+            "norm_jp_len": len(norm_jp_b),
+            "norm_all_off": total_size + len(raw_b) + len(norm_b) + len(norm_jp_b),
+            "norm_all_len": len(norm_all_b),
+            "norm_strict_off": total_size + len(raw_b) + len(norm_b) + len(norm_jp_b) + len(norm_all_b),
+            "norm_strict_len": len(norm_strict_b),
+            "norm_strict_jp_off": total_size + len(raw_b) + len(norm_b) + len(norm_jp_b) + len(norm_all_b) + len(norm_strict_b),
+            "norm_strict_jp_len": len(norm_strict_jp_b),
+            "norm_strict_all_off": total_size + len(raw_b) + len(norm_b) + len(norm_jp_b) + len(norm_all_b) + len(norm_strict_b) + len(norm_strict_jp_b),
+            "norm_strict_all_len": len(norm_strict_all_b),
+        }
+        extra_size = 0
+        if store_normalized:
+            entry_offsets.update(
+                {
+                    "norm_cf_off": total_size
+                    + len(raw_b)
+                    + len(norm_b)
+                    + len(norm_jp_b)
+                    + len(norm_all_b)
+                    + len(norm_strict_b)
+                    + len(norm_strict_jp_b)
+                    + len(norm_strict_all_b),
+                    "norm_cf_len": len(norm_cf_b),
+                    "norm_cf_jp_off": total_size
+                    + len(raw_b)
+                    + len(norm_b)
+                    + len(norm_jp_b)
+                    + len(norm_all_b)
+                    + len(norm_strict_b)
+                    + len(norm_strict_jp_b)
+                    + len(norm_strict_all_b)
+                    + len(norm_cf_b),
+                    "norm_cf_jp_len": len(norm_cf_jp_b),
+                    "norm_cf_all_off": total_size
+                    + len(raw_b)
+                    + len(norm_b)
+                    + len(norm_jp_b)
+                    + len(norm_all_b)
+                    + len(norm_strict_b)
+                    + len(norm_strict_jp_b)
+                    + len(norm_strict_all_b)
+                    + len(norm_cf_b)
+                    + len(norm_cf_jp_b),
+                    "norm_cf_all_len": len(norm_cf_all_b),
+                }
+            )
+            extra_size = len(norm_cf_b) + len(norm_cf_jp_b) + len(norm_cf_all_b)
         offsets.append(
-            {
-                "file": entry["file"],
-                "path": entry["path"],
-                "displayPath": entry["displayPath"],
-                "page": entry["page"],
-                "folderId": entry["folderId"],
-                "folderName": entry["folderName"],
-                "raw_off": total_size,
-                "raw_len": len(raw_b),
-                "norm_off": total_size + len(raw_b),
-                "norm_len": len(norm_b),
-                "norm_jp_off": total_size + len(raw_b) + len(norm_b),
-                "norm_jp_len": len(norm_jp_b),
-                "norm_all_off": total_size + len(raw_b) + len(norm_b) + len(norm_jp_b),
-                "norm_all_len": len(norm_all_b),
-            }
+            entry_offsets
         )
-        total_size += len(raw_b) + len(norm_b) + len(norm_jp_b) + len(norm_all_b)
+        total_size += (
+            len(raw_b)
+            + len(norm_b)
+            + len(norm_jp_b)
+            + len(norm_all_b)
+            + len(norm_strict_b)
+            + len(norm_strict_jp_b)
+            + len(norm_strict_all_b)
+            + extra_size
+        )
 
     with open(shared_path, "wb") as f:
         f.truncate(total_size)
@@ -2101,6 +2240,13 @@ def build_shared_blob(shared_path: Path, entries: List[Dict]) -> List[Dict]:
             f.write(encode_norm_text(entry["norm"]))
             f.write(encode_norm_text(entry["norm_jp"]))
             f.write(encode_norm_text(entry["norm_all"]))
+            f.write(encode_norm_text(entry.get("norm_strict", "")))
+            f.write(encode_norm_text(entry.get("norm_strict_jp", "")))
+            f.write(encode_norm_text(entry.get("norm_strict_all", "")))
+            if store_normalized:
+                f.write(encode_norm_text(entry.get("norm_cf", "")))
+                f.write(encode_norm_text(entry.get("norm_cf_jp", "")))
+                f.write(encode_norm_text(entry.get("norm_cf_all", "")))
     return offsets
 
 
@@ -2132,6 +2278,7 @@ class SearchRequest(BaseModel):
     mode: str = Field("AND", pattern="^(AND|OR)$")
     range_limit: int = Field(0, ge=0, le=5000)
     space_mode: str = Field("jp", pattern="^(none|jp|all)$")
+    normalize_mode: str | None = Field(None)
     folders: List[str]
 
     @field_validator("query")
@@ -2146,6 +2293,14 @@ class SearchRequest(BaseModel):
             raise ValueError("検索対象フォルダを1つ以上選択してください")
         return v
 
+    @field_validator("normalize_mode")
+    def validate_normalize_mode(cls, v: str | None) -> str | None:
+        if v is None or not str(v).strip():
+            return None
+        mode = str(v).strip().lower()
+        if mode not in {"exact", "normalized"}:
+            raise ValueError("normalize_mode は exact または normalized を指定してください")
+        return mode
 
 # --- グローバル状態 ---
 app = FastAPI(title="Preloaded Folder Search")
@@ -2265,6 +2420,8 @@ search_worker_count = 1
 search_concurrency = 1
 search_executor = None
 search_execution_mode = "thread"
+normalize_mode_warning_emitted = False
+
 
 WORKER_MEMORY_PAGES: Dict[str, List[Dict]] = {}
 WORKER_FOLDER_META: Dict[str, Tuple[str, str]] = {}
@@ -2275,6 +2432,7 @@ class SearchParams:
     mode: str
     range_limit: int
     space_mode: str
+    normalize_mode: str
 
 
 class AsyncRWLock:
@@ -2583,6 +2741,43 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if raw in {"1", "true", "yes"}:
+        return True
+    if raw in {"0", "false", "no"}:
+        return False
+    return default
+
+
+def resolve_normalize_mode(value: str | None) -> str:
+    global normalize_mode_warning_emitted
+    store_normalized = env_bool("INDEX_STORE_NORMALIZED", True)
+    if value:
+        normalized = value.strip().lower()
+        if normalized in {"exact", "normalized"}:
+            if normalized == "normalized" and not store_normalized:
+                if not normalize_mode_warning_emitted:
+                    log_warn("正規化モードは INDEX_STORE_NORMALIZED=1 が必要なため exact にフォールバックします")
+                    normalize_mode_warning_emitted = True
+                return "exact"
+            return normalized
+    env_value = os.getenv("QUERY_NORMALIZE", "nfkc_casefold").strip().lower()
+    if env_value == "nfkc_casefold":
+        if store_normalized:
+            return "normalized"
+        if not normalize_mode_warning_emitted:
+            log_warn("QUERY_NORMALIZE=nfkc_casefold には INDEX_STORE_NORMALIZED=1 が必要です")
+            normalize_mode_warning_emitted = True
+    return "exact"
+
+
+def normalize_mode_label(mode: str) -> str:
+    if mode == "normalized":
+        return "ゆらぎ吸収"
+    return "厳格（最小整形）"
+
+
 class MemoryCache:
     def __init__(self, max_entries: int, max_bytes: int, max_result_kb: int) -> None:
         self.max_entries = max_entries
@@ -2653,6 +2848,7 @@ def cache_key_for(query: str, params: "SearchParams", target_ids: List[str]) -> 
         "mode": params.mode,
         "range": params.range_limit,
         "space": params.space_mode,
+        "normalize": params.normalize_mode,
         "folders": sorted(target_ids),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -2901,6 +3097,7 @@ def update_query_stats(
             "mode": params.mode,
             "range": params.range_limit,
             "space": params.space_mode,
+            "normalize": params.normalize_mode,
             "folders": sorted(target_ids),
             "count_total": 0,
             "count_uncached": 0,
@@ -3116,7 +3313,8 @@ def rebuild_fixed_cache():
         target_ids = [fid for fid in entry.get("folders", []) if fid in folder_states and folder_states[fid].get("ready")]
         if not target_ids:
             continue
-        params = SearchParams(entry["mode"], entry["range"], entry["space"])
+        normalize_mode = resolve_normalize_mode(entry.get("normalize"))
+        params = SearchParams(entry["mode"], entry["range"], entry["space"], normalize_mode)
         try:
             results, keywords = run_search_direct(entry["query"], params, target_ids)
         except Exception:
@@ -3146,6 +3344,7 @@ def rebuild_fixed_cache():
             "mode": entry["mode"],
             "range": entry["range"],
             "space": entry["space"],
+            "normalize": normalize_mode,
             "folders": target_ids,
             "index_uuid": current_index_uuid,
             "schema_version": current_schema_version,
@@ -3409,6 +3608,8 @@ async def search(req: SearchRequest):
     global rw_lock, search_semaphore, search_executor, search_execution_mode
     if rw_lock is None or search_semaphore is None:
         raise HTTPException(status_code=503, detail="検索システムの初期化中です")
+
+    # Normal search (full index scan)
     async with search_semaphore:
         async with rw_lock.read_lock():
             start_time = time.time()
@@ -3417,7 +3618,8 @@ async def search(req: SearchRequest):
             if not target_ids:
                 raise HTTPException(status_code=400, detail="有効な検索対象フォルダがありません")
 
-            params = SearchParams(req.mode, req.range_limit, req.space_mode)
+            normalize_mode = resolve_normalize_mode(req.normalize_mode)
+            params = SearchParams(req.mode, req.range_limit, req.space_mode, normalize_mode)
             cache_key = cache_key_for(req.query, params, target_ids)
 
             # キャッシュからの取得を試行
@@ -3428,7 +3630,11 @@ async def search(req: SearchRequest):
             if cached_result:
                 return cached_result
 
-            keywords, norm_keyword_groups = build_query_groups(req.query, req.space_mode)
+            keywords, norm_keyword_groups = build_query_groups(
+                req.query,
+                req.space_mode,
+                normalize_mode,
+            )
             raw_keywords = keywords
             keywords_for_response = keywords
             worker_count = search_worker_count
@@ -3463,13 +3669,20 @@ async def search(req: SearchRequest):
         elapsed = time.time() - start_time
         log_info(
             f"検索完了: folders={len(target_ids)} results={len(results)} "
-            f"mode={req.mode} workers={worker_count} 時間={elapsed:.2f}s"
+            f"mode={req.mode} normalize={normalize_mode} workers={worker_count} 時間={elapsed:.2f}s"
         )
+
+        # Get current index UUID
+        current_gen_name = get_current_generation_pointer()
+        index_uuid = current_gen_name or "unknown"
+
         payload = {
             "count": len(results),
             "results": results,
             "keywords": keywords_for_response,
             "folder_ids": normalize_folder_ids(target_ids),
+            "index_uuid": index_uuid,
+            "normalize_mode": normalize_mode,
         }
         payload = apply_folder_order(payload, folder_order)
         payload_bytes = estimate_payload_bytes(payload)
@@ -3495,6 +3708,137 @@ async def search(req: SearchRequest):
 
         # UI側でハイライトしやすいように検索キーワードも返す
         return payload
+
+
+@app.post("/api/export")
+async def export_results(req: SearchRequest, format: str = "csv"):
+    """検索結果をCSV/JSON形式でエクスポートする"""
+    global rw_lock, search_semaphore, search_executor, search_execution_mode
+    if rw_lock is None or search_semaphore is None:
+        raise HTTPException(status_code=503, detail="検索システムの初期化中です")
+
+    # Validate format
+    if format not in ["csv", "json"]:
+        raise HTTPException(status_code=400, detail="format は csv または json を指定してください")
+
+    # Execute search first
+    async with search_semaphore:
+        async with rw_lock.read_lock():
+            available_ids = set(folder_states.keys())
+            target_ids = [f for f in req.folders if f in available_ids and folder_states[f].get("ready")]
+            if not target_ids:
+                raise HTTPException(status_code=400, detail="有効な検索対象フォルダがありません")
+
+            normalize_mode = resolve_normalize_mode(req.normalize_mode)
+            params = SearchParams(req.mode, req.range_limit, req.space_mode, normalize_mode)
+            keywords, norm_keyword_groups = build_query_groups(
+                req.query,
+                req.space_mode,
+                normalize_mode,
+            )
+            raw_keywords = keywords
+            worker_count = search_worker_count
+            loop = asyncio.get_running_loop()
+
+            if search_execution_mode == "process":
+                results = await loop.run_in_executor(
+                    search_executor,
+                    perform_search_process,
+                    target_ids,
+                    params,
+                    norm_keyword_groups,
+                    raw_keywords,
+                    worker_count,
+                )
+            else:
+                results = await loop.run_in_executor(
+                    None,
+                    perform_search,
+                    target_ids,
+                    params,
+                    norm_keyword_groups,
+                    raw_keywords,
+                    worker_count,
+                )
+
+    # Get current index UUID
+    current_gen_name = get_current_generation_pointer()
+    index_uuid = current_gen_name or "unknown"
+
+    # Prepare metadata
+    metadata = {
+        "query": req.query,
+        "mode": req.mode,
+        "range_limit": req.range_limit,
+        "space_mode": req.space_mode,
+        "normalize_mode": normalize_mode,
+        "folders": target_ids,
+        "folder_names": [folder_states[fid]["name"] for fid in target_ids if fid in folder_states],
+        "index_uuid": index_uuid,
+        "result_count": len(results),
+        "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    if format == "csv":
+        # Create CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Write metadata as comments
+        writer.writerow(["# フォルダ内テキスト検索 - エクスポート"])
+        writer.writerow(["# クエリ", req.query])
+        writer.writerow(["# モード", req.mode])
+        writer.writerow(["# 範囲", req.range_limit])
+        writer.writerow(["# 空白除去", req.space_mode])
+        writer.writerow(["# 表記ゆれ", normalize_mode_label(normalize_mode)])
+        writer.writerow(["# インデックスUUID", index_uuid])
+        writer.writerow(["# エクスポート日時", metadata["exported_at"]])
+        writer.writerow(["# 検索フォルダ", ", ".join(metadata["folder_names"])])
+        writer.writerow(["# 結果件数", len(results)])
+        writer.writerow([])
+
+        # Write header
+        writer.writerow(["ファイル名", "パス", "ページ", "フォルダ", "スニペット", "詳細"])
+
+        # Write results
+        for result in results:
+            writer.writerow([
+                result.get("file", ""),
+                result.get("displayPath") or result.get("path", ""),
+                result.get("page", ""),
+                result.get("folderName", ""),
+                result.get("context", ""),
+                result.get("detail", ""),
+            ])
+
+        csv_content = output.getvalue()
+        output.close()
+
+        # Return as downloadable file
+        return StreamingResponse(
+            io.BytesIO(csv_content.encode("utf-8-sig")),  # UTF-8 with BOM for Excel compatibility
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="search_results_{time.strftime("%Y%m%d_%H%M%S")}.csv"'
+            }
+        )
+
+    else:  # json
+        # Create JSON with metadata
+        export_data = {
+            "metadata": metadata,
+            "results": results,
+        }
+
+        json_content = json.dumps(export_data, ensure_ascii=False, indent=2)
+
+        return StreamingResponse(
+            io.BytesIO(json_content.encode("utf-8")),
+            media_type="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="search_results_{time.strftime("%Y%m%d_%H%M%S")}.json"'
+            }
+        )
 
 
 @app.get("/api/health")
