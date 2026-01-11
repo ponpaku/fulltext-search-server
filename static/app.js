@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.1
- * File Version: 1.1.9
+ * System Version: 1.1.6
+ * File Version: 1.2.8
  */
 
 const state = {
@@ -14,10 +14,11 @@ const state = {
   filteredResults: null,
   folderListOpen: true,
   isSearching: false,
-  spaceMode: 'none',
+  spaceMode: 'jp',
   renderedCount: 0,
   groupedResults: null,
   isRenderingBatch: false,
+  normalizeMode: 'normalized',
   fileModalFolderId: null,
   fileModalFolderName: '',
   fileModalScope: 'indexed',
@@ -43,6 +44,7 @@ const resultCountEl = $('resultCount');
 const modeGroup = $('modeGroup');
 const rangeInput = $('range');
 const spaceModeSelect = $('spaceMode');
+const normalizeModeSelect = $('normalizeMode');
 const searchForm = $('searchForm');
 const queryInput = $('query');
 const viewToggle = $('viewToggle');
@@ -66,12 +68,30 @@ const historyListContent = $('historyListContent');
 const clearHistoryBtn = $('clearHistoryBtn');
 const exportBtn = $('exportBtn');
 const filterBtn = $('filterBtn');
+const noticeBar = $('noticeBar');
 const filterPanel = $('filterPanel');
 const filterFoldersEl = $('filterFolders');
 const filterExtensionsEl = $('filterExtensions');
 const applyFilterBtn = $('applyFilter');
 const clearFilterBtn = $('clearFilter');
 const closeFilterBtn = $('closeFilter');
+
+let lastNormalizeNotice = null;
+
+const showNotice = (message) => {
+  if (!noticeBar) return;
+  noticeBar.textContent = message;
+  noticeBar.style.display = 'flex';
+  clearTimeout(showNotice._timer);
+  showNotice._timer = setTimeout(() => {
+    noticeBar.style.display = 'none';
+  }, 4000);
+};
+
+const getNormalizeLabel = (mode) => ({
+  exact: '厳格（最小整形）',
+  normalized: 'ゆらぎ吸収',
+}[mode] || mode);
 
 // ═══════════════════════════════════════════════════════════════
 // CLIPBOARD PERMISSION
@@ -173,7 +193,7 @@ const saveQueryHistory = () => {
   }
 };
 
-const addToQueryHistory = (query, mode, range, spaceMode, folders, resultCount, indexUuid) => {
+const addToQueryHistory = (query, mode, range, spaceMode, normalizeMode, folders, resultCount, indexUuid) => {
   const timestamp = Date.now();
   const historyItem = {
     id: `${timestamp}-${Math.random().toString(36).substr(2, 9)}`,
@@ -181,6 +201,7 @@ const addToQueryHistory = (query, mode, range, spaceMode, folders, resultCount, 
     mode,
     range_limit: range,
     space_mode: spaceMode,
+    normalize_mode: normalizeMode,
     folders: [...folders],
     result_count: resultCount,
     index_uuid: indexUuid,
@@ -196,6 +217,7 @@ const addToQueryHistory = (query, mode, range, spaceMode, folders, resultCount, 
       item.mode === mode &&
       item.range_limit === range &&
       item.space_mode === spaceMode &&
+      (item.normalize_mode || 'exact') === normalizeMode &&
       JSON.stringify(item.folders.sort()) === JSON.stringify([...folders].sort())
     );
   });
@@ -558,6 +580,7 @@ const executeHistorySearch = async (item) => {
   setMode(item.mode);
   rangeInput.value = item.range_limit || 0;
   spaceModeSelect.value = item.space_mode || 'jp';
+  normalizeModeSelect.value = item.normalize_mode || 'exact';
 
   // Restore folder selection
   state.selected = new Set(item.folders);
@@ -582,6 +605,7 @@ const renderHistoryList = () => {
       'jp': '和文のみ',
       'all': 'すべて'
     }[item.space_mode] || item.space_mode;
+    const normalizeLabel = getNormalizeLabel(item.normalize_mode || 'exact');
 
     return `
       <div class="history-item ${item.pinned ? 'pinned' : ''}" data-id="${item.id}">
@@ -604,6 +628,7 @@ const renderHistoryList = () => {
           <span class="chip">${item.mode}</span>
           ${item.range_limit > 0 ? `<span class="chip">範囲: ${item.range_limit}</span>` : ''}
           <span class="chip">空白: ${spaceModeLabel}</span>
+          <span class="chip">表記ゆれ: ${normalizeLabel}</span>
           <span class="chip">${item.result_count} 件</span>
           <span class="chip subtle">${formatTimestamp(item.timestamp)}</span>
         </div>
@@ -1093,15 +1118,18 @@ const runSearch = async (evt) => {
 
   const query = queryInput.value.trim();
   const rangeVal = parseInt(rangeInput.value || '0', 10);
-  const spaceMode = spaceModeSelect?.value || 'none';
+  const spaceMode = spaceModeSelect?.value || 'jp';
+  const normalizeMode = normalizeModeSelect?.value || 'normalized';
   const payload = {
     query,
     mode: state.mode,
     range_limit: state.mode === 'AND' ? rangeVal : 0,
     space_mode: spaceMode,
+    normalize_mode: normalizeMode,
     folders: Array.from(state.selected),
   };
   state.spaceMode = spaceMode;
+  state.normalizeMode = normalizeMode;
 
   if (!payload.query) {
     alert('キーワードを入力してください');
@@ -1135,15 +1163,30 @@ const runSearch = async (evt) => {
 
     // Save to query history
     state.currentIndexUuid = data.index_uuid || null;
+    const effectiveNormalize = data.normalize_mode || normalizeMode;
+    if (normalizeModeSelect && data.normalize_mode && data.normalize_mode !== normalizeModeSelect.value) {
+      normalizeModeSelect.value = data.normalize_mode;
+    }
     addToQueryHistory(
       query,
       state.mode,
       rangeVal,
       spaceMode,
+      effectiveNormalize,
       payload.folders,
       data.count || 0,
       state.currentIndexUuid
     );
+
+    if (data.normalize_mode && data.normalize_mode !== normalizeMode) {
+      const requestedLabel = getNormalizeLabel(normalizeMode);
+      const effectiveLabel = getNormalizeLabel(data.normalize_mode);
+      const message = `表記ゆれ: ${requestedLabel} → ${effectiveLabel}`;
+      if (message !== lastNormalizeNotice) {
+        showNotice(message);
+        lastNormalizeNotice = message;
+      }
+    }
 
     renderResults(data);
   } catch (err) {
@@ -1242,11 +1285,13 @@ if (exportBtn) {
     const query = queryInput.value.trim();
     const rangeVal = parseInt(rangeInput.value || '0', 10);
     const spaceMode = spaceModeSelect?.value || 'jp';
+    const normalizeMode = normalizeModeSelect?.value || 'normalized';
     const payload = {
       query,
       mode: state.mode,
       range_limit: state.mode === 'AND' ? rangeVal : 0,
       space_mode: spaceMode,
+      normalize_mode: normalizeMode,
       folders: Array.from(state.selected),
     };
 
