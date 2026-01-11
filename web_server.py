@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.6"
-# File Version: 1.6.8
+# File Version: 1.6.9
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -2706,6 +2706,12 @@ def resolve_normalize_mode(value: str | None) -> str:
     return "exact"
 
 
+def normalize_mode_label(mode: str) -> str:
+    if mode == "normalized":
+        return "ゆらぎ吸収"
+    return "厳格（最小整形）"
+
+
 class MemoryCache:
     def __init__(self, max_entries: int, max_bytes: int, max_result_kb: int) -> None:
         self.max_entries = max_entries
@@ -3718,7 +3724,7 @@ async def export_results(req: SearchRequest, format: str = "csv"):
         writer.writerow(["# モード", req.mode])
         writer.writerow(["# 範囲", req.range_limit])
         writer.writerow(["# 空白除去", req.space_mode])
-        writer.writerow(["# 表記ゆれ", normalize_mode])
+        writer.writerow(["# 表記ゆれ", normalize_mode_label(normalize_mode)])
         writer.writerow(["# インデックスUUID", index_uuid])
         writer.writerow(["# エクスポート日時", metadata["exported_at"]])
         writer.writerow(["# 検索フォルダ", ", ".join(metadata["folder_names"])])
