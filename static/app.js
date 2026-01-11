@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.5
- * File Version: 1.2.4
+ * System Version: 1.1.6
+ * File Version: 1.2.6
  */
 
 const state = {
@@ -1148,16 +1148,24 @@ const runSearch = async (evt) => {
 
     // Save to query history
     state.currentIndexUuid = data.index_uuid || null;
+    const effectiveNormalize = data.normalize_mode || normalizeMode;
+    if (normalizeModeSelect && data.normalize_mode && data.normalize_mode !== normalizeModeSelect.value) {
+      normalizeModeSelect.value = data.normalize_mode;
+    }
     addToQueryHistory(
       query,
       state.mode,
       rangeVal,
       spaceMode,
-      normalizeMode,
+      effectiveNormalize,
       payload.folders,
       data.count || 0,
       state.currentIndexUuid
     );
+
+    if (data.normalize_mode && data.normalize_mode !== normalizeMode) {
+      alert('表記ゆれが環境設定により厳格へ切り替わりました');
+    }
 
     renderResults(data);
   } catch (err) {

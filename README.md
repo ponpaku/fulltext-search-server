@@ -1,7 +1,7 @@
 # Full-Search-PDFs
 
-System Version: 1.1.5
-README File Version: 1.1.6
+System Version: 1.1.6
+README File Version: 1.1.7
 
 ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。
 UI は `static/` 配下で提供されます。
@@ -42,6 +42,7 @@ chmod +x run.sh
 - 絞り込み: 検索結果の「絞り込み」からフォルダ/ファイル形式でローカル絞り込み
   - フィルタ未選択は全件表示
 - 表記ゆれ: 既定は「ゆらぎ吸収」。厳格は改行/不可視のみ整える
+  - 環境設定により厳格へフォールバックする場合あり
 - 検索履歴: 右上の履歴アイコンから表示（最大30件、ピン留め可）
 - CSV出力: 検索結果がある時のみ「CSV」ボタンが表示
 

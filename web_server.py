@@ -21,8 +21,8 @@ from typing import Dict, List, Tuple
 
 from dotenv import load_dotenv
 
-SYSTEM_VERSION = "1.1.5"
-# File Version: 1.6.6
+SYSTEM_VERSION = "1.1.6"
+# File Version: 1.6.8
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -139,7 +139,7 @@ def normalize_text_minimal(text: str) -> str:
     text = normalize_invisible_separators(text)
     text = re.sub(r"[\n\t\r]", " ", text)
     text = re.sub(r"\s+", " ", text)
-    return text
+    return text.strip()
 
 
 def normalize_text_nfkc_casefold(text: str, compress_spaces: bool = True) -> str:
@@ -3610,6 +3610,7 @@ async def search(req: SearchRequest):
             "keywords": keywords_for_response,
             "folder_ids": normalize_folder_ids(target_ids),
             "index_uuid": index_uuid,
+            "normalize_mode": normalize_mode,
         }
         payload = apply_folder_order(payload, folder_order)
         payload_bytes = estimate_payload_bytes(payload)
