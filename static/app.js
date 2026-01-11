@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
  * System Version: 1.1.6
- * File Version: 1.2.6
+ * File Version: 1.2.8
  */
 
 const state = {
@@ -14,7 +14,7 @@ const state = {
   filteredResults: null,
   folderListOpen: true,
   isSearching: false,
-  spaceMode: 'none',
+  spaceMode: 'jp',
   renderedCount: 0,
   groupedResults: null,
   isRenderingBatch: false,
@@ -68,12 +68,30 @@ const historyListContent = $('historyListContent');
 const clearHistoryBtn = $('clearHistoryBtn');
 const exportBtn = $('exportBtn');
 const filterBtn = $('filterBtn');
+const noticeBar = $('noticeBar');
 const filterPanel = $('filterPanel');
 const filterFoldersEl = $('filterFolders');
 const filterExtensionsEl = $('filterExtensions');
 const applyFilterBtn = $('applyFilter');
 const clearFilterBtn = $('clearFilter');
 const closeFilterBtn = $('closeFilter');
+
+let lastNormalizeNotice = null;
+
+const showNotice = (message) => {
+  if (!noticeBar) return;
+  noticeBar.textContent = message;
+  noticeBar.style.display = 'flex';
+  clearTimeout(showNotice._timer);
+  showNotice._timer = setTimeout(() => {
+    noticeBar.style.display = 'none';
+  }, 4000);
+};
+
+const getNormalizeLabel = (mode) => ({
+  exact: '厳格（最小整形）',
+  normalized: 'ゆらぎ吸収',
+}[mode] || mode);
 
 // ═══════════════════════════════════════════════════════════════
 // CLIPBOARD PERMISSION
@@ -587,10 +605,7 @@ const renderHistoryList = () => {
       'jp': '和文のみ',
       'all': 'すべて'
     }[item.space_mode] || item.space_mode;
-    const normalizeLabel = {
-      'exact': '厳格',
-      'normalized': 'ゆらぎ吸収'
-    }[item.normalize_mode] || '厳格';
+    const normalizeLabel = getNormalizeLabel(item.normalize_mode || 'exact');
 
     return `
       <div class="history-item ${item.pinned ? 'pinned' : ''}" data-id="${item.id}">
@@ -1103,7 +1118,7 @@ const runSearch = async (evt) => {
 
   const query = queryInput.value.trim();
   const rangeVal = parseInt(rangeInput.value || '0', 10);
-  const spaceMode = spaceModeSelect?.value || 'none';
+  const spaceMode = spaceModeSelect?.value || 'jp';
   const normalizeMode = normalizeModeSelect?.value || 'normalized';
   const payload = {
     query,
@@ -1164,7 +1179,13 @@ const runSearch = async (evt) => {
     );
 
     if (data.normalize_mode && data.normalize_mode !== normalizeMode) {
-      alert('表記ゆれが環境設定により厳格へ切り替わりました');
+      const requestedLabel = getNormalizeLabel(normalizeMode);
+      const effectiveLabel = getNormalizeLabel(data.normalize_mode);
+      const message = `表記ゆれ: ${requestedLabel} → ${effectiveLabel}`;
+      if (message !== lastNormalizeNotice) {
+        showNotice(message);
+        lastNormalizeNotice = message;
+      }
     }
 
     renderResults(data);
