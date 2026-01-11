@@ -1984,6 +1984,8 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
         log_notice(
             f"失敗履歴が無い/読み込めないため再試行対象を拡張: {folder} 件数={len(bootstrap_set)}"
         )
+        if bootstrap_set and not existing_cache and len(bootstrap_set) == len(current_map):
+            log_warn(f"再試行対象が全件になります: {folder}")
         retry_set.update(bootstrap_set)
 
     # valid_cache は既存のインデックスから開始（削除検知のため、まだフィルタしない）
