@@ -1512,6 +1512,14 @@ def file_state_path_for(folder_path: str, gen_dir: Path | None = None) -> Path:
     return gen_dir / f"file_state_{hashed}.jsonl"
 
 
+def failures_path_for(folder_path: str, gen_dir: Path | None = None) -> Path:
+    """failures.json のパスを取得（世代ディレクトリ対応）."""
+    hashed = hashlib.sha256(folder_path.encode("utf-8")).hexdigest()[:12]
+    if gen_dir is None:
+        gen_dir = get_current_generation_dir()
+    return gen_dir / f"failures_{hashed}.json"
+
+
 def load_file_state(folder_path: str, gen_dir: Path | None = None) -> Dict[str, Dict]:
     """file_state.jsonl をディスクから読み込み（世代ディレクトリ対応）."""
     state_path = file_state_path_for(folder_path, gen_dir)
@@ -1553,6 +1561,41 @@ def save_file_state(folder_path: str, states: Dict[str, Dict], gen_dir: Path | N
                 f.write(json.dumps(states[path_str], ensure_ascii=False) + "\n")
     except Exception:
         # 保存失敗時は静かにスキップ
+        return
+
+
+def load_failures(folder_path: str, gen_dir: Path | None = None) -> Tuple[Dict[str, str], bool]:
+    """failures.json をディスクから読み込み（世代ディレクトリ対応）."""
+    failures_path = failures_path_for(folder_path, gen_dir)
+    if not failures_path.exists():
+        return {}, False
+    try:
+        with open(failures_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}, True
+    except Exception as e:
+        log_warn(f"failures_*.json 読み込みエラー: {failures_path} ({e})")
+    return {}, False
+
+
+def save_failures(folder_path: str, failures: Dict[str, str], gen_dir: Path | None = None):
+    """failures.json をディスクに保存（世代ディレクトリ対応）."""
+    failures_path = failures_path_for(folder_path, gen_dir)
+    if gen_dir is not None:
+        gen_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = failures_path.with_suffix(".json.tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(failures, f, ensure_ascii=False)
+        os.replace(temp_path, failures_path)
+    except Exception as e:
+        log_warn(f"failures_*.json 保存失敗: {failures_path} ({e})")
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except Exception:
+            pass
         return
 
 
@@ -1877,7 +1920,7 @@ def scan_files(folder: str) -> List[Path]:
     return files
 
 
-def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None = None, gen_dir: Path | None = None, prev_gen_dir: Path | None = None) -> Tuple[Dict[str, Dict], Dict, Dict[str, str]]:
+def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None = None, gen_dir: Path | None = None, prev_gen_dir: Path | None = None, failures_loaded: bool | None = None) -> Tuple[Dict[str, Dict], Dict, Dict[str, str]]:
     """インデックス作成（差分更新 & 高精度固定）."""
     start_time = time.time()
 
@@ -1938,6 +1981,21 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
 
     current_map = {str(f): f for f in all_files}
     failures = {k: v for k, v in failures.items() if k in current_map}
+    retry_set = set(failures.keys())
+    if prev_gen_dir is not None and failures_loaded is False:
+        bootstrap_set = {
+            path_str
+            for path_str in current_map
+            if path_str in prev_file_states and path_str not in existing_cache
+        }
+        log_notice(
+            "失敗履歴が無い/読み込めないため再試行対象を拡張: "
+            f"{folder} 件数={len(bootstrap_set)} "
+            f"(prev_states={len(prev_file_states)} cache={len(existing_cache)} files={len(current_map)})"
+        )
+        if bootstrap_set and not existing_cache and len(bootstrap_set) == len(current_map):
+            log_warn(f"再試行対象が全件になります: {folder}")
+        retry_set.update(bootstrap_set)
 
     # valid_cache は既存のインデックスから開始（削除検知のため、まだフィルタしない）
     valid_cache = dict(existing_cache)
@@ -1961,11 +2019,19 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
 
     # 段階的ハッシングによる差分判定
     targets = []
+    target_set = set()
+
+    def add_target(path_str: str, path_obj: Path) -> None:
+        if path_str in target_set:
+            return
+        targets.append(path_obj)
+        target_set.add(path_str)
+
     for path_str, path_obj in current_map.items():
         current_stat = get_file_stat(path_str)
         if not current_stat:
             # stat 取得失敗 → 再インデックス対象
-            targets.append(path_obj)
+            add_target(path_str, path_obj)
             current_file_states[path_str] = {
                 "path": path_str,
                 "last_indexed_at": time.time(),
@@ -1978,8 +2044,8 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
             path_str, current_stat, prev_state, diff_mode, fast_fp_bytes, full_hash_algo
         )
 
-        if should_reindex:
-            targets.append(path_obj)
+        if should_reindex or path_str in retry_set:
+            add_target(path_str, path_obj)
 
         current_file_states[path_str] = new_state
 
@@ -2003,6 +2069,8 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
                         }
                         if path_str in failures:
                             failures.pop(path_str, None)
+                        if path_str in retry_set:
+                            log_notice(f"再試行成功: {path_str}")
                     else:
                         failures[path_str] = reason or "抽出結果が空"
                         log_warn(f"インデックス失敗: {path_str} 理由={failures[path_str]}")
@@ -2018,6 +2086,7 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
 
     # ファイル状態を保存
     save_file_state(folder, current_file_states, gen_dir)
+    save_failures(folder, failures, gen_dir)
 
     stats = {
         "total_files": len(all_files),
@@ -2537,7 +2606,15 @@ def build_all_indexes():
             prev_gen_dir = get_current_generation_dir()
 
             prev_failures = index_failures.get(folder_id, {})
-            cache, stats, failures = build_index_for_folder(path, prev_failures, build_gen_dir, prev_gen_dir)
+            if prev_gen_dir:
+                prev_failures_disk, failures_loaded = load_failures(path, prev_gen_dir)
+            else:
+                prev_failures_disk, failures_loaded = {}, None
+            merged_failures = dict(prev_failures_disk)
+            merged_failures.update(prev_failures)
+            cache, stats, failures = build_index_for_folder(
+                path, merged_failures, build_gen_dir, prev_gen_dir, failures_loaded
+            )
 
             temp_indexes[folder_id] = cache
             temp_failures[folder_id] = failures
