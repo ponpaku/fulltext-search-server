@@ -1575,7 +1575,7 @@ def load_failures(folder_path: str, gen_dir: Path | None = None) -> Tuple[Dict[s
         if isinstance(data, dict):
             return {str(k): str(v) for k, v in data.items()}, True
     except Exception as e:
-        log_warn(f"failures.json 読み込みエラー: {failures_path} ({e})")
+        log_warn(f"failures_*.json 読み込みエラー: {failures_path} ({e})")
     return {}, False
 
 
@@ -1584,11 +1584,18 @@ def save_failures(folder_path: str, failures: Dict[str, str], gen_dir: Path | No
     failures_path = failures_path_for(folder_path, gen_dir)
     if gen_dir is not None:
         gen_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = failures_path.with_suffix(".json.tmp")
     try:
-        with open(failures_path, "w", encoding="utf-8") as f:
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(failures, f, ensure_ascii=False)
+        os.replace(temp_path, failures_path)
     except Exception as e:
-        log_warn(f"failures.json 保存失敗: {failures_path} ({e})")
+        log_warn(f"failures_*.json 保存失敗: {failures_path} ({e})")
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except Exception:
+            pass
         return
 
 
@@ -1982,7 +1989,9 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
             if path_str in prev_file_states and path_str not in existing_cache
         }
         log_notice(
-            f"失敗履歴が無い/読み込めないため再試行対象を拡張: {folder} 件数={len(bootstrap_set)}"
+            "失敗履歴が無い/読み込めないため再試行対象を拡張: "
+            f"{folder} 件数={len(bootstrap_set)} "
+            f"(prev_states={len(prev_file_states)} cache={len(existing_cache)} files={len(current_map)})"
         )
         if bootstrap_set and not existing_cache and len(bootstrap_set) == len(current_map):
             log_warn(f"再試行対象が全件になります: {folder}")
