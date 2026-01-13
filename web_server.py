@@ -2355,8 +2355,101 @@ class HeartbeatRequest(BaseModel):
     client_id: str = Field(..., min_length=8, max_length=64)
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_folder_states()
+    install_asyncio_exception_filter()
+    global search_semaphore, rw_lock, search_worker_count, search_executor, search_execution_mode, search_concurrency, fixed_cache_index, memory_cache, query_stats, query_stats_dirty, query_stats_last_saved, folder_order
+    rw_lock = AsyncRWLock()
+    memory_cache = MemoryCache(
+        DEFAULT_CACHE_MAX_ENTRIES,
+        DEFAULT_CACHE_MAX_MB * 1024 * 1024,
+        DEFAULT_CACHE_MAX_RESULT_KB,
+    )
+    init_cache_settings(memory_cache)
+    fixed_cache_index = load_fixed_cache_index()
+    # キャッシュ整合性検証（インデックス更新後の古いキャッシュを削除）
+    fixed_cache_index = validate_cache_integrity(fixed_cache_index)
+    save_fixed_cache_index(fixed_cache_index)
+    prune_cache_dir(set(fixed_cache_index.keys()))
+    query_stats = load_query_stats()
+    query_stats_dirty = False
+    query_stats_last_saved = time.time()
+    folder_order = folder_order_map()
+    budget, concurrency, workers = init_search_settings()
+    search_worker_count = workers
+    search_concurrency = concurrency
+    search_semaphore = asyncio.Semaphore(concurrency)
+    search_execution_mode = os.getenv("SEARCH_EXECUTION_MODE", "thread").strip().lower()
+    loop = asyncio.get_running_loop()
+    # インデックス構築はCPU負荷が高いのでスレッドで実施
+    async with rw_lock.write_lock():
+        await loop.run_in_executor(None, build_all_indexes)
+    log_info(f"システムバージョン: {SYSTEM_VERSION} / インデックスバージョン: {INDEX_VERSION}")
+    if search_execution_mode == "process":
+        process_shared = os.getenv("SEARCH_PROCESS_SHARED", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+        }
+        global PROCESS_SHARED
+        PROCESS_SHARED = process_shared
+        if process_shared:
+            folder_snapshot = build_process_shared_store()
+            search_executor = ProcessPoolExecutor(
+                max_workers=concurrency,
+                initializer=init_search_worker_shared,
+                initargs=(folder_snapshot, host_aliases),
+            )
+            log_info(
+                f"検索実行モード: process(shared) workers={concurrency} budget={budget}"
+            )
+        else:
+            folder_snapshot = [
+                {"id": fid, "path": meta["path"], "name": meta["name"]}
+                for fid, meta in folder_states.items()
+            ]
+            search_executor = ProcessPoolExecutor(
+                max_workers=concurrency,
+                initializer=init_search_worker,
+                initargs=(folder_snapshot, host_aliases),
+            )
+            log_info(f"検索実行モード: process workers={concurrency} budget={budget}")
+    else:
+        search_executor = None
+        log_info(
+            f"検索実行モード: thread concurrency={concurrency} workers={workers} budget={budget}"
+        )
+    scheme = (
+        "https"
+        if (Path(os.getenv("CERT_DIR", "certs")) / "lan-cert.pem").exists()
+        else "http"
+    )
+    urls = [
+        f"{scheme}://{ip}:{os.getenv('PORT', '80')}"
+        for ip in (get_ipv4_addresses() or ["0.0.0.0"])
+    ]
+
+    async def announce_access_urls():
+        await asyncio.sleep(0.2)
+        for url in urls:
+            log_info(f"アクセスURL: {colorize_url(url)}")
+
+    announce_task = asyncio.create_task(announce_access_urls())
+    rebuild_fixed_cache()
+    schedule_task = asyncio.create_task(schedule_index_rebuild())
+    try:
+        yield
+    finally:
+        for task in (announce_task, schedule_task):
+            task.cancel()
+        await asyncio.gather(announce_task, schedule_task, return_exceptions=True)
+        if search_executor:
+            search_executor.shutdown(wait=True)
+
+
 # --- グローバル状態 ---
-app = FastAPI(title="Preloaded Folder Search")
+app = FastAPI(title="Preloaded Folder Search", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -3554,82 +3647,6 @@ def per_request_workers() -> int:
     workers = budget // max(1, active_clients)
     workers = max(1, min(workers, max_per_request))
     return workers
-
-
-@app.on_event("startup")
-async def startup_event():
-    init_folder_states()
-    install_asyncio_exception_filter()
-    global search_semaphore, rw_lock, search_worker_count, search_executor, search_execution_mode, search_concurrency, fixed_cache_index, memory_cache, query_stats, query_stats_dirty, query_stats_last_saved, folder_order
-    rw_lock = AsyncRWLock()
-    memory_cache = MemoryCache(
-        DEFAULT_CACHE_MAX_ENTRIES,
-        DEFAULT_CACHE_MAX_MB * 1024 * 1024,
-        DEFAULT_CACHE_MAX_RESULT_KB,
-    )
-    init_cache_settings(memory_cache)
-    fixed_cache_index = load_fixed_cache_index()
-    # キャッシュ整合性検証（インデックス更新後の古いキャッシュを削除）
-    fixed_cache_index = validate_cache_integrity(fixed_cache_index)
-    save_fixed_cache_index(fixed_cache_index)
-    prune_cache_dir(set(fixed_cache_index.keys()))
-    query_stats = load_query_stats()
-    query_stats_dirty = False
-    query_stats_last_saved = time.time()
-    folder_order = folder_order_map()
-    budget, concurrency, workers = init_search_settings()
-    search_worker_count = workers
-    search_concurrency = concurrency
-    search_semaphore = asyncio.Semaphore(concurrency)
-    search_execution_mode = os.getenv("SEARCH_EXECUTION_MODE", "thread").strip().lower()
-    loop = asyncio.get_running_loop()
-    # インデックス構築はCPU負荷が高いのでスレッドで実施
-    async with rw_lock.write_lock():
-        await loop.run_in_executor(None, build_all_indexes)
-    log_info(f"システムバージョン: {SYSTEM_VERSION} / インデックスバージョン: {INDEX_VERSION}")
-    if search_execution_mode == "process":
-        process_shared = os.getenv("SEARCH_PROCESS_SHARED", "1").strip().lower() not in {
-            "0",
-            "false",
-            "no",
-        }
-        global PROCESS_SHARED
-        PROCESS_SHARED = process_shared
-        if process_shared:
-            folder_snapshot = build_process_shared_store()
-            search_executor = ProcessPoolExecutor(
-                max_workers=concurrency,
-                initializer=init_search_worker_shared,
-                initargs=(folder_snapshot, host_aliases),
-            )
-            log_info(
-                f"検索実行モード: process(shared) workers={concurrency} budget={budget}"
-            )
-        else:
-            folder_snapshot = [
-                {"id": fid, "path": meta["path"], "name": meta["name"]}
-                for fid, meta in folder_states.items()
-            ]
-            search_executor = ProcessPoolExecutor(
-                max_workers=concurrency,
-                initializer=init_search_worker,
-                initargs=(folder_snapshot, host_aliases),
-            )
-            log_info(f"検索実行モード: process workers={concurrency} budget={budget}")
-    else:
-        search_executor = None
-        log_info(f"検索実行モード: thread concurrency={concurrency} workers={workers} budget={budget}")
-    scheme = "https" if (Path(os.getenv("CERT_DIR", "certs")) / "lan-cert.pem").exists() else "http"
-    urls = [f"{scheme}://{ip}:{os.getenv('PORT', '80')}" for ip in (get_ipv4_addresses() or ["0.0.0.0"])]
-
-    async def announce_access_urls():
-        await asyncio.sleep(0.2)
-        for url in urls:
-            log_info(f"アクセスURL: {colorize_url(url)}")
-
-    asyncio.create_task(announce_access_urls())
-    rebuild_fixed_cache()
-    asyncio.create_task(schedule_index_rebuild())
 
 
 @app.get("/", response_class=FileResponse)
