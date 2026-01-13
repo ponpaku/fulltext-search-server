@@ -1,7 +1,7 @@
 # Full-Search-PDFs
 
 System Version: 1.1.11
-README File Version: 1.1.11
+README File Version: 1.1.12
 
 ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。
 UI は `static/` 配下で提供されます。
@@ -22,7 +22,7 @@ UI は `static/` 配下で提供されます。
 
 ## 起動
 ```bash
-python web_server.py
+uvicorn app:app --host 0.0.0.0 --port 80
 ```
 
 `.env` を使う場合は同ディレクトリに配置してください。

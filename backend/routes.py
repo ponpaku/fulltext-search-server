@@ -19,16 +19,41 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from dotenv import load_dotenv, find_dotenv
-
 SYSTEM_VERSION = "1.1.11"
-# File Version: 1.8.3
+# File Version: 1.0.0
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 import io
+
+from .config import (
+    ALLOWED_EXTS,
+    BASE_DIR,
+    BUILD_DIR,
+    CACHE_DIR,
+    CURRENT_POINTER_FILE,
+    DEFAULT_CACHE_MAX_ENTRIES,
+    DEFAULT_CACHE_MAX_MB,
+    DEFAULT_CACHE_MAX_RESULT_KB,
+    DEFAULT_HEARTBEAT_TTL_SEC,
+    DETAIL_CONTEXT_PREFIX,
+    DETAIL_WINDOW_SIZE,
+    FILE_STATE_FILENAME,
+    FIXED_CACHE_INDEX,
+    INDEX_DIR,
+    INDEX_VERSION,
+    QUERY_STATS_PATH,
+    SEARCH_CACHE_VERSION,
+    SEARCH_ENTRIES_CHUNK_THRESHOLD,
+    SNIPPET_PREFIX_CHARS,
+    SNIPPET_TOTAL_LENGTH,
+    STATIC_DIR,
+    display_path_for_path,
+    load_config,
+)
+from .context import AppContext, AppState
 try:
     from colorama import Fore, Style, init as colorama_init
 except Exception:
@@ -42,43 +67,6 @@ from openpyxl import load_workbook
 from pdfminer.high_level import extract_pages, extract_text as miner_extract_text
 from pdfminer.layout import LAParams, LTTextBoxHorizontal, LTTextBoxVertical, LTTextContainer
 from pdfminer.pdfpage import PDFPage
-
-# --- 定数 ---
-BASE_DIR = Path(__file__).resolve().parent
-INDEX_DIR = BASE_DIR / "indexes"
-INDEX_DIR.mkdir(exist_ok=True)
-
-ALLOWED_EXTS = {".pdf", ".docx", ".txt", ".csv", ".xlsx", ".xls"}
-INDEX_VERSION = "v3"
-SEARCH_CACHE_VERSION = "v2"
-CACHE_DIR = BASE_DIR / "cache"
-CACHE_DIR.mkdir(exist_ok=True)
-FIXED_CACHE_INDEX = CACHE_DIR / "fixed_cache_index.json"
-QUERY_STATS_PATH = CACHE_DIR / "query_stats.json"
-
-# --- 世代ディレクトリ定数 ---
-BUILD_DIR = INDEX_DIR / ".build"
-BUILD_DIR.mkdir(exist_ok=True)
-CURRENT_POINTER_FILE = INDEX_DIR / "current.txt"
-
-# --- 段階的ハッシング定数 ---
-FILE_STATE_FILENAME = "file_state.jsonl"
-
-# --- 検索表示定数 ---
-SNIPPET_PREFIX_CHARS = 40
-SNIPPET_TOTAL_LENGTH = 160
-DETAIL_CONTEXT_PREFIX = 500
-DETAIL_WINDOW_SIZE = 2000
-
-# --- 検索パフォーマンス定数 ---
-SEARCH_ENTRIES_CHUNK_THRESHOLD = 2000
-
-# --- キャッシュデフォルト定数 ---
-DEFAULT_CACHE_MAX_ENTRIES = 200
-DEFAULT_CACHE_MAX_MB = 200
-DEFAULT_CACHE_MAX_RESULT_KB = 2000
-DEFAULT_HEARTBEAT_TTL_SEC = 90
-
 
 # --- ユーティリティ ---
 CID_PATTERN = re.compile(r"\(cid:\d+\)", re.IGNORECASE)
@@ -2420,6 +2408,7 @@ async def lifespan(app: FastAPI):
         log_info(
             f"検索実行モード: thread concurrency={concurrency} workers={workers} budget={budget}"
         )
+    sync_state()
     scheme = (
         "https"
         if (Path(os.getenv("CERT_DIR", "certs")) / "lan-cert.pem").exists()
@@ -2458,119 +2447,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-STATIC_DIR = Path("static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-def read_env_raw_value(var_name: str) -> str | None:
-    env_path = find_dotenv()
-    if not env_path:
-        return None
-    try:
-        with open(env_path, "r", encoding="utf-8") as file:
-            for line in file:
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                if stripped.lower().startswith("export "):
-                    stripped = stripped[7:].lstrip()
-                if "=" not in stripped:
-                    continue
-                key, value = stripped.split("=", 1)
-                if key.strip() != var_name:
-                    continue
-                value = value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                    value = value[1:-1]
-                return value
-    except OSError:
-        return None
-    return None
-
-
-had_search_folders = "SEARCH_FOLDERS" in os.environ
-raw_search_folders = read_env_raw_value("SEARCH_FOLDERS")
-load_dotenv()
-if not had_search_folders and raw_search_folders is not None:
-    os.environ["SEARCH_FOLDERS"] = raw_search_folders
-
-
-def parse_host_aliases() -> Dict[str, str]:
-    raw = os.getenv("SEARCH_FOLDER_ALIASES", "")
-    normalized = raw.replace("\n", ";").replace("|", ";").replace(",", ";")
-    aliases: Dict[str, str] = {}
-    for part in normalized.split(";"):
-        entry = part.strip()
-        if not entry or entry.startswith("#") or "=" not in entry:
-            continue
-        key, value = entry.split("=", 1)
-        key = key.strip().lower()
-        value = value.strip()
-        if key and value:
-            aliases[key] = value
-    return aliases
-
-
-def display_path_for_path(path: str, aliases: Dict[str, str]) -> str:
-    if not aliases:
-        return path
-    match = re.match(r"^(\\\\|//)([^\\\\/]+)([\\\\/].*)?$", path)
-    if not match:
-        for host, alias in aliases.items():
-            pattern = re.compile(rf"(\\\\|//){re.escape(host)}(?=[\\\\/])", re.IGNORECASE)
-            if pattern.search(path):
-                return pattern.sub(lambda m: f"{m.group(1)}{alias}", path)
-        return path
-    prefix, host, rest = match.groups()
-    host_key = host.lower()
-    alias = aliases.get(host_key)
-    if not alias:
-        return path
-    return f"{prefix}{alias}{rest or ''}"
-
-
-def parse_configured_folders() -> List[Dict[str, str]]:
-    raw = os.getenv("SEARCH_FOLDERS", "")
-    normalized = raw.replace("\n", ";").replace("|", ";").replace(",", ";")
-    folders: List[Dict[str, str]] = []
-    for part in normalized.split(";"):
-        entry = part.strip()
-        if not entry:
-            continue
-        if "#" in entry:
-            entry = entry.split("#", 1)[0].strip()
-        if not entry:
-            continue
-        label = None
-        if "=" in entry:
-            label, entry = entry.split("=", 1)
-            label = label.strip()
-            entry = entry.strip()
-        p = entry.strip().strip('"').strip("'")
-        if not p:
-            continue
-        # smb://host/share または smb:\host\share を UNC/posix 共有パスに変換
-        if p.lower().startswith("smb:"):
-            without_scheme = p[4:].lstrip("/\\")
-            if not without_scheme:
-                continue
-            if os.name == "nt":
-                unc_path = without_scheme.replace("/", "\\")
-                p = f"\\\\{unc_path}"
-            else:
-                posix_path = without_scheme.replace("\\", "/")
-                p = f"//{posix_path}"
-        folders.append(
-            {
-                "path": os.path.abspath(os.path.expanduser(p)),
-                "label": label or "",
-            }
-        )
-    return folders
-
-
-host_aliases = parse_host_aliases()
-configured_folders = parse_configured_folders()
+config = load_config()
+host_aliases = config.host_aliases
+configured_folders = config.configured_folders
 folder_states: Dict[str, Dict] = {}
 memory_indexes: Dict[str, Dict[str, Dict]] = {}
 memory_pages: Dict[str, List[Dict]] = {}
@@ -2602,6 +2484,71 @@ file_id_map: Dict[str, Dict[str, str]] = {}
 file_id_lock = threading.RLock()
 active_client_lock = threading.Lock()
 active_client_heartbeats: Dict[str, float] = {}
+
+state = AppState(
+    configured_folders=configured_folders,
+    host_aliases=host_aliases,
+    folder_states=folder_states,
+    memory_indexes=memory_indexes,
+    memory_pages=memory_pages,
+    index_failures=index_failures,
+    cache_lock=cache_lock,
+    memory_cache=memory_cache,
+    query_stats=query_stats,
+    fixed_cache_index=fixed_cache_index,
+    fixed_cache_dirty=fixed_cache_dirty,
+    fixed_cache_last_saved=fixed_cache_last_saved,
+    query_stats_dirty=query_stats_dirty,
+    query_stats_last_saved=query_stats_last_saved,
+    fixed_cache_rebuild_in_progress=fixed_cache_rebuild_in_progress,
+    fixed_cache_last_trigger=fixed_cache_last_trigger,
+    folder_order=folder_order,
+    access_urls=access_urls,
+    process_shared=PROCESS_SHARED,
+    worker_shared_entries=WORKER_SHARED_ENTRIES,
+    worker_shared_mm=WORKER_SHARED_MM,
+    worker_shared_files=WORKER_SHARED_FILES,
+    search_semaphore=search_semaphore,
+    rw_lock=rw_lock,
+    search_worker_count=search_worker_count,
+    search_concurrency=search_concurrency,
+    search_executor=search_executor,
+    search_execution_mode=search_execution_mode,
+    normalize_mode_warning_emitted=normalize_mode_warning_emitted,
+    active_client_heartbeats=active_client_heartbeats,
+    active_client_lock=active_client_lock,
+)
+ctx = AppContext(config=config, state=state)
+
+
+def sync_state() -> None:
+    state.memory_cache = memory_cache
+    state.query_stats = query_stats
+    state.fixed_cache_index = fixed_cache_index
+    state.fixed_cache_dirty = fixed_cache_dirty
+    state.fixed_cache_last_saved = fixed_cache_last_saved
+    state.query_stats_dirty = query_stats_dirty
+    state.query_stats_last_saved = query_stats_last_saved
+    state.fixed_cache_rebuild_in_progress = fixed_cache_rebuild_in_progress
+    state.fixed_cache_last_trigger = fixed_cache_last_trigger
+    state.folder_order = folder_order
+    state.process_shared = PROCESS_SHARED
+    state.worker_shared_entries = WORKER_SHARED_ENTRIES
+    state.worker_shared_mm = WORKER_SHARED_MM
+    state.worker_shared_files = WORKER_SHARED_FILES
+    state.search_semaphore = search_semaphore
+    state.rw_lock = rw_lock
+    state.search_worker_count = search_worker_count
+    state.search_concurrency = search_concurrency
+    state.search_executor = search_executor
+    state.search_execution_mode = search_execution_mode
+    state.normalize_mode_warning_emitted = normalize_mode_warning_emitted
+    state.active_client_heartbeats = active_client_heartbeats
+
+
+def create_app() -> FastAPI:
+    app.state.ctx = ctx
+    return app
 
 
 WORKER_MEMORY_PAGES: Dict[str, List[Dict]] = {}
@@ -3546,6 +3493,7 @@ async def schedule_index_rebuild():
                     )
                     log_info("スケジュール再構築: process を再初期化")
             rebuild_fixed_cache()
+            sync_state()
         log_info("スケジュール再構築完了")
 
 
@@ -3634,6 +3582,7 @@ def rebuild_fixed_cache():
         fixed_cache_dirty = False
         fixed_cache_last_saved = time.time()
         maybe_flush_query_stats(force=True)
+        sync_state()
     prune_cache_dir(set(new_index.keys()))
 
 
@@ -4102,8 +4051,7 @@ def run():
 
     port = int(os.getenv("PORT", "80"))
     cert_dir = os.getenv("CERT_DIR", "certs")
-    base_dir = Path(__file__).resolve().parent
-    cert_path = (base_dir / cert_dir).resolve()
+    cert_path = (BASE_DIR / cert_dir).resolve()
     cert_file = cert_path / "lan-cert.pem"
     key_file = cert_path / "lan-key.pem"
 
@@ -4115,7 +4063,7 @@ def run():
         }
 
     config = uvicorn.Config(
-        "web_server:app",
+        "app:app",
         host="0.0.0.0",
         port=port,
         reload=False,
