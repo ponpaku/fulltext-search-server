@@ -19,10 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from dotenv import load_dotenv, find_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 SYSTEM_VERSION = "1.1.11"
-# File Version: 1.8.3
+# File Version: 1.8.4
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -44,7 +44,7 @@ from pdfminer.layout import LAParams, LTTextBoxHorizontal, LTTextBoxVertical, LT
 from pdfminer.pdfpage import PDFPage
 
 # --- 定数 ---
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parents[1]
 INDEX_DIR = BASE_DIR / "indexes"
 INDEX_DIR.mkdir(exist_ok=True)
 
@@ -2458,8 +2458,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-STATIC_DIR = Path("static")
+STATIC_DIR = BASE_DIR / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def create_app() -> FastAPI:
+    return app
 
 
 def read_env_raw_value(var_name: str) -> str | None:
@@ -4102,8 +4106,7 @@ def run():
 
     port = int(os.getenv("PORT", "80"))
     cert_dir = os.getenv("CERT_DIR", "certs")
-    base_dir = Path(__file__).resolve().parent
-    cert_path = (base_dir / cert_dir).resolve()
+    cert_path = (BASE_DIR / cert_dir).resolve()
     cert_file = cert_path / "lan-cert.pem"
     key_file = cert_path / "lan-key.pem"
 
@@ -4115,7 +4118,7 @@ def run():
         }
 
     config = uvicorn.Config(
-        "web_server:app",
+        "app:app",
         host="0.0.0.0",
         port=port,
         reload=False,
