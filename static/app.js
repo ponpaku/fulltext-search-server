@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.6
- * File Version: 1.2.8
+ * System Version: 1.1.7
+ * File Version: 1.2.9
  */
 
 const state = {
@@ -685,6 +685,7 @@ clearHistoryBtn.addEventListener('click', () => {
 const groupResultsByFile = (results) => {
   const grouped = new Map();
   results.forEach((hit, idx) => {
+    const hitIndex = hit._idx ?? idx;
     const existing = grouped.get(hit.path) || {
       path: hit.path,
       displayPath: hit.displayPath || hit.path,
@@ -694,7 +695,7 @@ const groupResultsByFile = (results) => {
       pages: new Set(),
     };
     if (hit.page && hit.page !== '-') existing.pages.add(hit.page);
-    existing.hits.push({ ...hit, _idx: idx });
+    existing.hits.push({ ...hit, _idx: hitIndex });
     grouped.set(hit.path, existing);
   });
 
@@ -743,13 +744,50 @@ const highlightText = (text, keywords) => {
   return result;
 };
 
+const applyDetailContent = (detailEl, hit) => {
+  if (!detailEl || !hit) return;
+  const text = hit.detail || hit.context || '';
+  detailEl.innerHTML = highlightText(text, state.keywords);
+};
+
+const fetchDetailForHit = async (hit, detailEl) => {
+  if (!hit?.detail_key || !detailEl) return;
+  if (hit.detail) {
+    applyDetailContent(detailEl, hit);
+    return;
+  }
+  if (hit._detailLoading) return;
+  hit._detailLoading = true;
+  detailEl.textContent = '詳細を取得中...';
+  try {
+    const params = new URLSearchParams({
+      file_id: hit.detail_key.file_id,
+      page: hit.detail_key.page,
+      hit_pos: hit.detail_key.hit_pos,
+    });
+    const response = await fetch(`/api/detail?${params.toString()}`);
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || '詳細の取得に失敗しました');
+    }
+    const payload = await response.json();
+    hit.detail = payload.detail || '';
+    applyDetailContent(detailEl, hit);
+  } catch (err) {
+    console.warn('detail fetch failed', err);
+    detailEl.textContent = '詳細の取得に失敗しました';
+  } finally {
+    hit._detailLoading = false;
+  }
+};
+
 // ═══════════════════════════════════════════════════════════════
 // RENDER RESULTS
 // ═══════════════════════════════════════════════════════════════
 
 const renderHitCards = (items) => {
   return items.map((r, idx) => `
-    <div class="result-card" data-hit="${idx}">
+    <div class="result-card" data-hit="${r._idx ?? idx}">
       <div class="result-header">
         <div>
           <div class="result-title">${r.file}</div>
@@ -805,14 +843,14 @@ const renderFileCards = (groups) => {
       <div class="grouped-hits">
         ${g.hits.map(hit => `
           <div class="hit-item" data-hit="${hit._idx}">
-            <div class="hit-summary">
-              <div class="hit-meta">
-                <span class="chip">ページ ${hit.page}</span>
-                <span class="chip subtle">${hit.folderName || hit.folderId}</span>
-              </div>
-              <div class="mini-snippet">${highlightText(hit.context, state.keywords)}</div>
+          <div class="hit-summary">
+            <div class="hit-meta">
+              <span class="chip">ページ ${hit.page}</span>
+              <span class="chip subtle">${hit.folderName || hit.folderId}</span>
             </div>
-            <div class="result-detail">
+            <div class="mini-snippet">${highlightText(hit.context, state.keywords)}</div>
+          </div>
+          <div class="result-detail">
               <div class="detail-text">${highlightText(hit.detail || hit.context, state.keywords)}</div>
               <div class="detail-meta">
                 <span>ページ: ${hit.page}</span>
@@ -860,6 +898,12 @@ const bindResultHandlers = (root) => {
       if (e.target.closest('.hit-item')) return;
       card.classList.toggle('expanded');
       setExpandHint(card, card.classList.contains('expanded'));
+      const hitIndex = Number(card.dataset.hit);
+      const detailEl = card.querySelector('.detail-text');
+      const hit = state.results[hitIndex];
+      if (card.classList.contains('expanded')) {
+        fetchDetailForHit(hit, detailEl);
+      }
     });
   });
 
@@ -871,6 +915,12 @@ const bindResultHandlers = (root) => {
       if (card) {
         card.classList.add('expanded');
         setExpandHint(card, true);
+      }
+      const hitIndex = Number(item.dataset.hit);
+      const detailEl = item.querySelector('.detail-text');
+      const hit = state.results[hitIndex];
+      if (item.classList.contains('expanded')) {
+        fetchDetailForHit(hit, detailEl);
       }
     });
   });
@@ -925,7 +975,7 @@ const handleResultsScroll = () => {
 const renderResults = (payload) => {
   if (payload) {
     const { results, keywords } = payload;
-    state.results = results || [];
+    state.results = (results || []).map((item, idx) => ({ ...item, _idx: idx }));
     state.keywords = keywords || [];
     state.filteredResults = null;
     state.filter.folders = new Set();

@@ -1,6 +1,14 @@
 # 変更履歴
 
-System Version: 1.1.6
+System Version: 1.1.7
+
+## 1.1.7
+
+- 2026-01-12: 改善: 検索レスポンスから detail を除外し、クリック時に detail を取得するように変更。
+  - `/api/search` の結果に `detail_key`（file_id/page/hit_pos）を追加
+  - `/api/detail` を新設し、詳細本文を遅延取得
+  - UIで詳細パネルを開いたタイミングで detail を取得してハイライトを維持
+  - キャッシュバージョンを更新して detail_key が必ず返るように調整
 
 ## 1.1.6
 
