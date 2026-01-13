@@ -8,7 +8,9 @@ System Version: 1.1.7
   - `/api/search` の結果に `detail_key`（file_id/page/hit_pos）を追加
   - `/api/detail` を新設し、詳細本文を遅延取得
   - UIで詳細パネルを開いたタイミングで detail を取得してハイライトを維持
+  - CSV/JSONのエクスポートは従来どおり detail を含める
   - キャッシュバージョンを更新して detail_key が必ず返るように調整
+  - 実測: 大量ヒット時のレスポンス生成が大幅に短縮（開発機で 2.6s → 0.7〜1.3s 程度）
 
 ## 1.1.6
 

@@ -25,6 +25,8 @@ const state = {
   queryHistory: [],
   historyModalOpen: false,
   currentIndexUuid: null,
+  detailCache: new Map(),
+  detailRequests: new Map(),
   filter: {
     folders: new Set(),
     extensions: new Set(),
@@ -37,6 +39,14 @@ const state = {
 
 // DOM Elements
 const $ = (id) => document.getElementById(id);
+const escapeHtml = (value) => (
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+);
 const folderListEl = $('folderList');
 const folderStatusEl = $('folderStatus');
 const resultsEl = $('results');
@@ -296,13 +306,15 @@ const renderFolderStatus = (folders) => {
     const indexed = f.stats?.indexed_files 
       ? `${f.stats.indexed_files}/${f.stats.total_files ?? '-'} 件` 
       : '';
+    const safeName = escapeHtml(f.name);
+    const safeMessage = f.message ? escapeHtml(f.message) : '';
     
     return `
       <div class="status-item ${statusClass}" data-id="${f.id}">
         <span class="status-dot"></span>
         <div class="status-info">
-          <span class="status-name">${f.name}</span>
-          <span class="status-detail">${f.ready ? '検索可' : '処理中'} ${indexed} ${f.message || ''}</span>
+          <span class="status-name">${safeName}</span>
+          <span class="status-detail">${f.ready ? '検索可' : '処理中'} ${indexed} ${safeMessage}</span>
         </div>
       </div>
     `;
@@ -323,13 +335,15 @@ const renderFolderList = (folders) => {
     const checked = f.ready ? 'checked' : '';
     const disabled = f.ready ? '' : 'disabled';
     const fileCount = f.stats?.total_files ? `${f.stats.total_files} ファイル` : '';
+    const safeName = escapeHtml(f.name);
+    const safePath = escapeHtml(f.displayPath || f.path);
     
     return `
       <label class="folder-item ${f.ready && state.selected.has(f.id) ? 'selected' : ''}">
         <input type="checkbox" data-id="${f.id}" ${checked} ${disabled}>
         <div class="folder-info">
-          <div class="folder-name">${f.name}</div>
-          <div class="folder-path">${f.displayPath || f.path}</div>
+          <div class="folder-name">${safeName}</div>
+          <div class="folder-path">${safePath}</div>
           <div class="folder-meta">
             <span class="chip ${f.ready ? 'positive' : ''}">${f.ready ? '検索可' : '準備中'}</span>
             ${fileCount ? `<span class="chip">${fileCount}</span>` : ''}
@@ -463,8 +477,8 @@ const loadFileList = async (folderId, folderName, scope) => {
 
     const items = data.files.map(f => {
       const depth = f.relative.replace(/\\\\/g, '/').replace(/\\/g, '/').split('/').length - 1;
-      const safeRel = f.relative;
-      const reason = f.reason ? `<span class="file-reason">理由: ${f.reason}</span>` : '';
+      const safeRel = escapeHtml(f.relative);
+      const reason = f.reason ? `<span class="file-reason">理由: ${escapeHtml(f.reason)}</span>` : '';
       const statusLabel = data.scope === 'all'
         ? `<span class="file-status ${f.indexed ? 'indexed' : 'missing'}">${f.indexed ? '済' : '未'}</span>`
         : '';
@@ -484,7 +498,7 @@ const loadFileList = async (folderId, folderName, scope) => {
       </div>
     `;
   } catch (err) {
-    fileListContent.innerHTML = `<div class="loading-placeholder">エラー: ${err.message}</div>`;
+    fileListContent.innerHTML = `<div class="loading-placeholder">エラー: ${escapeHtml(err.message)}</div>`;
     console.error(err);
   }
 };
@@ -606,11 +620,16 @@ const renderHistoryList = () => {
       'all': 'すべて'
     }[item.space_mode] || item.space_mode;
     const normalizeLabel = getNormalizeLabel(item.normalize_mode || 'exact');
+    const safeQuery = escapeHtml(item.query);
+    const safeFolders = escapeHtml(folderNames);
+    const safeMode = escapeHtml(item.mode);
+    const safeSpaceMode = escapeHtml(spaceModeLabel);
+    const safeNormalize = escapeHtml(normalizeLabel);
 
     return `
       <div class="history-item ${item.pinned ? 'pinned' : ''}" data-id="${item.id}">
         <div class="history-header">
-          <div class="history-query">${item.query}</div>
+          <div class="history-query">${safeQuery}</div>
           <div class="history-actions">
             <button type="button" class="chip-btn pin-btn" data-id="${item.id}" title="${item.pinned ? 'ピン解除' : 'ピン留め'}">
               <svg viewBox="0 0 24 24" fill="${item.pinned ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2">
@@ -625,14 +644,14 @@ const renderHistoryList = () => {
           </div>
         </div>
         <div class="history-meta">
-          <span class="chip">${item.mode}</span>
+          <span class="chip">${safeMode}</span>
           ${item.range_limit > 0 ? `<span class="chip">範囲: ${item.range_limit}</span>` : ''}
-          <span class="chip">空白: ${spaceModeLabel}</span>
-          <span class="chip">表記ゆれ: ${normalizeLabel}</span>
+          <span class="chip">空白: ${safeSpaceMode}</span>
+          <span class="chip">表記ゆれ: ${safeNormalize}</span>
           <span class="chip">${item.result_count} 件</span>
           <span class="chip subtle">${formatTimestamp(item.timestamp)}</span>
         </div>
-        <div class="history-folders">${folderNames}</div>
+        <div class="history-folders">${safeFolders}</div>
       </div>
     `;
   }).join('');
@@ -719,29 +738,65 @@ const buildFlexibleRegex = (keyword) => {
   return new RegExp(pattern, 'gi');
 };
 
+const collectMatches = (text, regex) => {
+  const matches = [];
+  if (!regex) return matches;
+  regex.lastIndex = 0;
+  let match = regex.exec(text);
+  while (match) {
+    if (!match[0]) break;
+    matches.push({ start: match.index, end: match.index + match[0].length });
+    if (regex.lastIndex === match.index) regex.lastIndex += 1;
+    match = regex.exec(text);
+  }
+  return matches;
+};
+
+const hasOverlap = (ranges, candidate) => (
+  ranges.some((range) => !(candidate.end <= range.start || candidate.start >= range.end))
+);
+
+const addMatchRanges = (ranges, candidates) => {
+  candidates.forEach((candidate) => {
+    if (!hasOverlap(ranges, candidate)) {
+      ranges.push(candidate);
+    }
+  });
+};
+
+const renderHighlighted = (text, ranges) => {
+  if (!ranges.length) return escapeHtml(text);
+  const sorted = ranges.slice().sort((a, b) => a.start - b.start);
+  let output = '';
+  let cursor = 0;
+  sorted.forEach((range) => {
+    output += escapeHtml(text.slice(cursor, range.start));
+    output += `<span class="highlight">${escapeHtml(text.slice(range.start, range.end))}</span>`;
+    cursor = range.end;
+  });
+  output += escapeHtml(text.slice(cursor));
+  return output;
+};
+
 const highlightText = (text, keywords) => {
-  if (!keywords?.length) return text;
-  
-  let result = text;
-  keywords
-    .sort((a, b) => b.length - a.length)
-    .forEach(kw => {
-      if (!kw) return;
-      const escaped = escapeRegex(kw);
-      const regex = new RegExp(escaped, 'gi');
-      const strictApplied = result.replace(regex, match => `<span class="highlight">${match}</span>`);
-      if (strictApplied !== result) {
-        result = strictApplied;
-        return;
+  const rawText = String(text ?? '');
+  if (!keywords?.length) return escapeHtml(rawText);
+
+  const ranges = [];
+  const sortedKeywords = [...keywords].sort((a, b) => b.length - a.length);
+  sortedKeywords.forEach((kw) => {
+    if (!kw) return;
+    const regex = new RegExp(escapeRegex(kw), 'gi');
+    let matches = collectMatches(rawText, regex);
+    if (!matches.length && state.spaceMode !== 'none') {
+      const flex = buildFlexibleRegex(kw);
+      if (flex) {
+        matches = collectMatches(rawText, flex);
       }
-      if (state.spaceMode !== 'none') {
-        const flex = buildFlexibleRegex(kw);
-        if (flex) {
-          result = result.replace(flex, match => `<span class="highlight">${match}</span>`);
-        }
-      }
-    });
-  return result;
+    }
+    addMatchRanges(ranges, matches);
+  });
+  return renderHighlighted(rawText, ranges);
 };
 
 const applyDetailContent = (detailEl, hit) => {
@@ -750,34 +805,74 @@ const applyDetailContent = (detailEl, hit) => {
   detailEl.innerHTML = highlightText(text, state.keywords);
 };
 
+const buildDetailCacheKey = (detailKey) => {
+  if (!detailKey) return '';
+  const pageKey = detailKey.page ?? '';
+  const hitPos = detailKey.hit_pos ?? 0;
+  return `${detailKey.file_id}:${pageKey}:${hitPos}`;
+};
+
+const requestDetail = async (detailKey) => {
+  const params = new URLSearchParams({
+    file_id: detailKey.file_id,
+    page: detailKey.page,
+    hit_pos: String(detailKey.hit_pos ?? 0),
+  });
+  const response = await fetch(`/api/detail?${params.toString()}`);
+  if (!response.ok) {
+    let message = '詳細の取得に失敗しました';
+    try {
+      const err = await response.json();
+      if (err?.detail) message = err.detail;
+    } catch (_) {
+      message = '詳細の取得に失敗しました';
+    }
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
+  }
+  const payload = await response.json();
+  return payload.detail || '';
+};
+
 const fetchDetailForHit = async (hit, detailEl) => {
   if (!hit?.detail_key || !detailEl) return;
   if (hit.detail) {
     applyDetailContent(detailEl, hit);
     return;
   }
-  if (hit._detailLoading) return;
-  hit._detailLoading = true;
+  const cacheKey = buildDetailCacheKey(hit.detail_key);
+  if (state.detailCache.has(cacheKey)) {
+    hit.detail = state.detailCache.get(cacheKey) || '';
+    applyDetailContent(detailEl, hit);
+    return;
+  }
+
   detailEl.textContent = '詳細を取得中...';
+  let request = state.detailRequests.get(cacheKey);
+  if (!request) {
+    request = requestDetail(hit.detail_key)
+      .then((detail) => {
+        state.detailCache.set(cacheKey, detail);
+        return detail;
+      })
+      .finally(() => {
+        state.detailRequests.delete(cacheKey);
+      });
+    state.detailRequests.set(cacheKey, request);
+  }
+
   try {
-    const params = new URLSearchParams({
-      file_id: hit.detail_key.file_id,
-      page: hit.detail_key.page,
-      hit_pos: hit.detail_key.hit_pos,
-    });
-    const response = await fetch(`/api/detail?${params.toString()}`);
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw new Error(err.detail || '詳細の取得に失敗しました');
-    }
-    const payload = await response.json();
-    hit.detail = payload.detail || '';
+    const detail = await request;
+    hit.detail = detail || '';
     applyDetailContent(detailEl, hit);
   } catch (err) {
     console.warn('detail fetch failed', err);
-    detailEl.textContent = '詳細の取得に失敗しました';
-  } finally {
-    hit._detailLoading = false;
+    if (err?.status === 404) {
+      detailEl.textContent = '詳細が見つかりません';
+    } else {
+      detailEl.textContent = err?.message || '詳細の取得に失敗しました';
+    }
   }
 };
 
@@ -786,82 +881,102 @@ const fetchDetailForHit = async (hit, detailEl) => {
 // ═══════════════════════════════════════════════════════════════
 
 const renderHitCards = (items) => {
-  return items.map((r, idx) => `
-    <div class="result-card" data-hit="${r._idx ?? idx}">
-      <div class="result-header">
-        <div>
-          <div class="result-title">${r.file}</div>
-          <div class="result-path">${r.displayPath || r.path}</div>
+  return items.map((r, idx) => {
+    const safeFile = escapeHtml(r.file);
+    const safePath = escapeHtml(r.displayPath || r.path);
+    const safeFolder = escapeHtml(r.folderName || r.folderId);
+    const safePage = escapeHtml(r.page);
+    return `
+      <div class="result-card" data-hit="${r._idx ?? idx}">
+        <div class="result-header">
+          <div>
+            <div class="result-title">${safeFile}</div>
+            <div class="result-path">${safePath}</div>
+          </div>
+          <div class="result-actions">
+            <span class="chip">ページ ${safePage}</span>
+            <span class="chip">${safeFolder}</span>
+            <button type="button" class="chip-btn copy-btn" data-path="${safePath}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+              コピー
+            </button>
+          </div>
         </div>
-        <div class="result-actions">
-          <span class="chip">ページ ${r.page}</span>
-          <span class="chip">${r.folderName || r.folderId}</span>
-          <button type="button" class="chip-btn copy-btn" data-path="${r.displayPath || r.path}">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2"/>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-            </svg>
-            コピー
-          </button>
+        <div class="result-context">${highlightText(r.context, state.keywords)}</div>
+        <div class="result-detail">
+          <div class="detail-text">${highlightText(r.detail || r.context, state.keywords)}</div>
+          <div class="detail-meta">
+            <span>フォルダ: ${safeFolder}</span>
+            <span>ページ: ${safePage}</span>
+            <span class="truncate">パス: ${safePath}</span>
+          </div>
         </div>
       </div>
-      <div class="result-context">${highlightText(r.context, state.keywords)}</div>
-      <div class="result-detail">
-        <div class="detail-text">${highlightText(r.detail || r.context, state.keywords)}</div>
-        <div class="detail-meta">
-          <span>フォルダ: ${r.folderName || r.folderId}</span>
-          <span>ページ: ${r.page}</span>
-          <span class="truncate">パス: ${r.displayPath || r.path}</span>
-        </div>
-      </div>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 };
 
 const renderFileCards = (groups) => {
-  return groups.map(g => `
-    <div class="result-card grouped" data-path="${g.path}">
-      <div class="result-header">
-        <div>
-          <div class="result-title">${g.file}</div>
-          <div class="result-path">${g.displayPath || g.path}</div>
-          <div class="expand-hint">クリックでヒット一覧を表示</div>
-        </div>
-        <div class="result-actions">
-          <span class="chip">${g.hits.length} ヒット</span>
-          ${g.pages.length ? `<span class="chip">${g.pages.length > 8 ? `該当ページ数：${g.pages.length}ページ` : `ページ ${g.pages.join(', ')}`}</span>` : ''}
-          <span class="chip">${g.folderName}</span>
-          <button type="button" class="chip-btn copy-btn" data-path="${g.displayPath || g.path}">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2"/>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-            </svg>
-            コピー
-          </button>
-        </div>
-      </div>
-      <div class="grouped-hits">
-        ${g.hits.map(hit => `
-          <div class="hit-item" data-hit="${hit._idx}">
-          <div class="hit-summary">
-            <div class="hit-meta">
-              <span class="chip">ページ ${hit.page}</span>
-              <span class="chip subtle">${hit.folderName || hit.folderId}</span>
-            </div>
-            <div class="mini-snippet">${highlightText(hit.context, state.keywords)}</div>
+  return groups.map(g => {
+    const safeFile = escapeHtml(g.file);
+    const safePath = escapeHtml(g.displayPath || g.path);
+    const safeFolder = escapeHtml(g.folderName);
+    const pagesLabel = g.pages.length
+      ? (g.pages.length > 8 ? `該当ページ数：${g.pages.length}ページ` : `ページ ${g.pages.join(', ')}`)
+      : '';
+    const safePagesLabel = escapeHtml(pagesLabel);
+    return `
+      <div class="result-card grouped" data-path="${safePath}">
+        <div class="result-header">
+          <div>
+            <div class="result-title">${safeFile}</div>
+            <div class="result-path">${safePath}</div>
+            <div class="expand-hint">クリックでヒット一覧を表示</div>
           </div>
-          <div class="result-detail">
-              <div class="detail-text">${highlightText(hit.detail || hit.context, state.keywords)}</div>
-              <div class="detail-meta">
-                <span>ページ: ${hit.page}</span>
-                <span class="truncate">パス: ${hit.displayPath || hit.path}</span>
+          <div class="result-actions">
+            <span class="chip">${g.hits.length} ヒット</span>
+            ${g.pages.length ? `<span class="chip">${safePagesLabel}</span>` : ''}
+            <span class="chip">${safeFolder}</span>
+            <button type="button" class="chip-btn copy-btn" data-path="${safePath}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+              コピー
+            </button>
+          </div>
+        </div>
+        <div class="grouped-hits">
+          ${g.hits.map(hit => {
+            const safeHitFolder = escapeHtml(hit.folderName || hit.folderId);
+            const safeHitPage = escapeHtml(hit.page);
+            const safeHitPath = escapeHtml(hit.displayPath || hit.path);
+            return `
+            <div class="hit-item" data-hit="${hit._idx}">
+            <div class="hit-summary">
+              <div class="hit-meta">
+                <span class="chip">ページ ${safeHitPage}</span>
+                <span class="chip subtle">${safeHitFolder}</span>
+              </div>
+              <div class="mini-snippet">${highlightText(hit.context, state.keywords)}</div>
+            </div>
+            <div class="result-detail">
+                <div class="detail-text">${highlightText(hit.detail || hit.context, state.keywords)}</div>
+                <div class="detail-meta">
+                  <span>ページ: ${safeHitPage}</span>
+                  <span class="truncate">パス: ${safeHitPath}</span>
+                </div>
               </div>
             </div>
-          </div>
-        `).join('')}
+          `;
+          }).join('')}
+        </div>
       </div>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 };
 
 const setExpandHint = (card, expanded) => {
@@ -980,6 +1095,8 @@ const renderResults = (payload) => {
     state.filteredResults = null;
     state.filter.folders = new Set();
     state.filter.extensions = new Set();
+    state.detailCache = new Map();
+    state.detailRequests = new Map();
     buildFilterOptions();
     renderFilterOptions();
   }
@@ -1062,20 +1179,22 @@ const renderFilterOptions = () => {
   if (!filterFoldersEl || !filterExtensionsEl) return;
   const folderHtml = state.filterOptions.folders.length ? state.filterOptions.folders.map((item, idx) => {
     const checked = state.filter.folders.has(item.id) ? 'checked' : '';
+    const safeLabel = escapeHtml(item.label);
     return `
       <label class="filter-item">
         <input type="checkbox" data-value="${item.id}" ${checked}>
-        <span>${item.label}</span>
+        <span>${safeLabel}</span>
         <span class="filter-count">${item.count}</span>
       </label>
     `;
   }).join('') : '<div class="empty-sub">対象なし</div>';
   const extHtml = state.filterOptions.extensions.length ? state.filterOptions.extensions.map((item, idx) => {
     const checked = state.filter.extensions.has(item.name) ? 'checked' : '';
+    const safeName = escapeHtml(item.name);
     return `
       <label class="filter-item">
         <input type="checkbox" data-value="${item.name}" ${checked}>
-        <span>${item.name}</span>
+        <span>${safeName}</span>
         <span class="filter-count">${item.count}</span>
       </label>
     `;
@@ -1247,7 +1366,7 @@ const runSearch = async (evt) => {
           <path d="M15 9l-6 6M9 9l6 6"/>
         </svg>
         <p class="empty-title">エラー</p>
-        <p class="empty-sub">${err.message}</p>
+        <p class="empty-sub">${escapeHtml(err.message)}</p>
       </div>
     `;
     console.error(err);

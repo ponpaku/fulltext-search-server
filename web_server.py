@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 
 SYSTEM_VERSION = "1.1.7"
 # File Version: 1.7.0
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -630,6 +630,7 @@ def _build_search_result(
 
     file_id = entry.get("fileId") or file_id_from_path(entry["path"])
     page_raw = entry.get("pageRaw", entry.get("page"))
+    hit_pos = raw_hit_pos if raw_hit_pos >= 0 else 0
     result = {
         "file": entry["file"],
         "path": entry["path"],
@@ -641,13 +642,13 @@ def _build_search_result(
         "detail_key": {
             "file_id": file_id,
             "page": page_raw,
-            "hit_pos": raw_hit_pos,
+            "hit_pos": hit_pos,
         },
         "folderId": entry["folderId"],
         "folderName": entry["folderName"],
     }
     if include_detail:
-        result["detail"] = build_detail_text(raw_text, raw_hit_pos)
+        result["detail"] = build_detail_text(raw_text, hit_pos)
     return result
 
 
@@ -3591,7 +3592,11 @@ async def get_folder_files(folder_id: str, scope: str = "indexed"):
 
 
 @app.get("/api/detail")
-async def get_detail(file_id: str, page: str, hit_pos: int):
+async def get_detail(
+    file_id: str = Query(..., min_length=8, max_length=8, pattern=r"^[0-9a-f]{8}$"),
+    page: str = Query(..., min_length=1),
+    hit_pos: int = Query(0, ge=0),
+):
     global rw_lock
     if rw_lock is None:
         raise HTTPException(status_code=503, detail="検索システムの初期化中です")
