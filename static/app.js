@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.6
- * File Version: 1.2.8
+ * System Version: 1.1.7
+ * File Version: 1.3.0
  */
 
 const state = {
@@ -25,6 +25,8 @@ const state = {
   queryHistory: [],
   historyModalOpen: false,
   currentIndexUuid: null,
+  detailCache: new Map(),
+  detailRequests: new Map(),
   filter: {
     folders: new Set(),
     extensions: new Set(),
@@ -743,6 +745,81 @@ const highlightText = (text, keywords) => {
   return result;
 };
 
+const buildDetailCacheKey = (detailKey) => {
+  if (!detailKey) return '';
+  return `${detailKey.file_id || ''}:${detailKey.page}:${detailKey.hit_pos}`;
+};
+
+const fetchDetail = async (detailKey) => {
+  if (!detailKey?.file_id) return '';
+  const params = new URLSearchParams({
+    file_id: detailKey.file_id,
+    page: detailKey.page,
+    hit_pos: detailKey.hit_pos,
+  });
+  const res = await fetch(`/api/detail?${params.toString()}`);
+  if (!res.ok) {
+    let message = '詳細の取得に失敗しました';
+    try {
+      const err = await res.json();
+      if (err?.detail) message = err.detail;
+    } catch (err) {
+      console.warn('detail fetch parse failed', err);
+    }
+    throw new Error(message);
+  }
+  const data = await res.json();
+  return data.detail || '';
+};
+
+const ensureDetailLoaded = async (hitIndex, container) => {
+  const hit = state.results[hitIndex];
+  if (!hit || !container) return;
+  const detailEl = container.querySelector('.detail-text');
+  if (!detailEl) return;
+  if (hit.detail) {
+    detailEl.innerHTML = highlightText(hit.detail, state.keywords);
+    return;
+  }
+  if (!hit.detail_key) return;
+
+  const cacheKey = buildDetailCacheKey(hit.detail_key);
+  const cached = state.detailCache.get(cacheKey);
+  if (cached) {
+    hit.detail = cached;
+    detailEl.innerHTML = highlightText(hit.detail || hit.context, state.keywords);
+    return;
+  }
+
+  detailEl.classList.add('is-loading');
+  detailEl.textContent = '詳細を取得中...';
+
+  let request = state.detailRequests.get(cacheKey);
+  if (!request) {
+    request = fetchDetail(hit.detail_key)
+      .then((detail) => {
+        state.detailCache.set(cacheKey, detail);
+        return detail;
+      })
+      .finally(() => {
+        state.detailRequests.delete(cacheKey);
+      });
+    state.detailRequests.set(cacheKey, request);
+  }
+
+  try {
+    const detail = await request;
+    hit.detail = detail;
+    detailEl.classList.remove('is-loading');
+    detailEl.innerHTML = highlightText(hit.detail || hit.context, state.keywords);
+  } catch (err) {
+    detailEl.classList.remove('is-loading');
+    detailEl.innerHTML = highlightText(hit.context, state.keywords);
+    console.error(err);
+    showNotice(err.message || '詳細の取得に失敗しました');
+  }
+};
+
 // ═══════════════════════════════════════════════════════════════
 // RENDER RESULTS
 // ═══════════════════════════════════════════════════════════════
@@ -858,19 +935,31 @@ const bindResultHandlers = (root) => {
     card.addEventListener('click', (e) => {
       if (e.target.closest('.copy-btn')) return;
       if (e.target.closest('.hit-item')) return;
-      card.classList.toggle('expanded');
-      setExpandHint(card, card.classList.contains('expanded'));
+      const expanded = card.classList.toggle('expanded');
+      setExpandHint(card, expanded);
+      if (expanded) {
+        const hitIndex = Number(card.dataset.hit);
+        if (!Number.isNaN(hitIndex)) {
+          ensureDetailLoaded(hitIndex, card);
+        }
+      }
     });
   });
 
   root.querySelectorAll('.hit-item').forEach(item => {
     item.addEventListener('click', (e) => {
       if (e.target.closest('.copy-btn')) return;
-      item.classList.toggle('expanded');
+      const expanded = item.classList.toggle('expanded');
       const card = item.closest('.result-card');
       if (card) {
         card.classList.add('expanded');
         setExpandHint(card, true);
+      }
+      if (expanded) {
+        const hitIndex = Number(item.dataset.hit);
+        if (!Number.isNaN(hitIndex)) {
+          ensureDetailLoaded(hitIndex, item);
+        }
       }
     });
   });
@@ -930,6 +1019,8 @@ const renderResults = (payload) => {
     state.filteredResults = null;
     state.filter.folders = new Set();
     state.filter.extensions = new Set();
+    state.detailCache.clear();
+    state.detailRequests.clear();
     buildFilterOptions();
     renderFilterOptions();
   }

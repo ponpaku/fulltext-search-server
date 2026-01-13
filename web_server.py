@@ -21,9 +21,9 @@ from typing import Dict, List, Tuple
 
 from dotenv import load_dotenv
 
-SYSTEM_VERSION = "1.1.6"
-# File Version: 1.6.9
-from fastapi import FastAPI, HTTPException
+SYSTEM_VERSION = "1.1.7"
+# File Version: 1.7.0
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,7 +50,7 @@ INDEX_DIR.mkdir(exist_ok=True)
 
 ALLOWED_EXTS = {".pdf", ".docx", ".txt", ".csv", ".xlsx", ".xls"}
 INDEX_VERSION = "v3"
-SEARCH_CACHE_VERSION = "v1"
+SEARCH_CACHE_VERSION = "v2"
 CACHE_DIR = BASE_DIR / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 FIXED_CACHE_INDEX = CACHE_DIR / "fixed_cache_index.json"
@@ -177,6 +177,54 @@ def normalize_detail_text(text: str) -> str:
     text = re.sub(r"\n(?!　)", " ", text)
     text = re.sub(r"[ \t]+", " ", text).strip()
     return text
+
+
+def file_id_from_path(path: str) -> str:
+    normalized = os.path.normcase(os.path.normpath(path))
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return digest[:8]
+
+
+def build_detail_text(raw_text: str, hit_pos: int) -> str:
+    detail_pos = hit_pos if hit_pos != -1 else 0
+    detail_start = max(0, detail_pos - DETAIL_CONTEXT_PREFIX)
+    detail_end = min(len(raw_text), detail_start + DETAIL_WINDOW_SIZE)
+    detail_text_raw = raw_text[detail_start:detail_end]
+    return normalize_detail_text(detail_text_raw)
+
+
+def build_detail_key(result: Dict) -> Dict | None:
+    file_id = result.get("file_id")
+    if not file_id:
+        return None
+    return {
+        "file_id": file_id,
+        "page": result.get("page"),
+        "hit_pos": result.get("raw_hit_pos", -1),
+    }
+
+
+def build_lightweight_result(result: Dict) -> Dict:
+    detail_key = build_detail_key(result)
+    payload = {
+        "file": result.get("file"),
+        "path": result.get("path"),
+        "displayPath": result.get("displayPath"),
+        "page": result.get("page"),
+        "context": result.get("context"),
+        "folderId": result.get("folderId"),
+        "folderName": result.get("folderName"),
+    }
+    if detail_key:
+        payload["detail_key"] = detail_key
+    return payload
+
+
+def strip_internal_fields(result: Dict) -> Dict:
+    cleaned = dict(result)
+    cleaned.pop("raw_hit_pos", None)
+    cleaned.pop("file_id", None)
+    return cleaned
 
 
 def get_ipv4_addresses() -> List[str]:
@@ -619,11 +667,7 @@ def _build_search_result(
     snippet_raw = raw_for_positions[snippet_start:snippet_end]
     snippet = f"...{normalize_snippet_text(snippet_raw)}..."
 
-    detail_pos = raw_hit_pos if raw_hit_pos != -1 else 0
-    detail_start = max(0, detail_pos - DETAIL_CONTEXT_PREFIX)
-    detail_end = min(len(raw_text), detail_start + DETAIL_WINDOW_SIZE)
-    detail_text_raw = raw_text[detail_start:detail_end]
-    detail_text = normalize_detail_text(detail_text_raw)
+    detail_text = build_detail_text(raw_text, raw_hit_pos)
 
     return {
         "file": entry["file"],
@@ -632,8 +676,10 @@ def _build_search_result(
             "displayPath", display_path_for_path(entry["path"], host_aliases)
         ),
         "page": entry["page"],
+        "file_id": entry.get("file_id"),
         "context": snippet,
         "detail": detail_text,
+        "raw_hit_pos": raw_hit_pos,
         "folderId": entry["folderId"],
         "folderName": entry["folderName"],
     }
@@ -2111,10 +2157,53 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
     return valid_cache, stats, failures
 
 
+def reset_detail_maps() -> None:
+    file_id_map.clear()
+    path_file_id_map.clear()
+    detail_entry_index.clear()
+
+
+def register_file_id(path: str) -> str:
+    cached = path_file_id_map.get(path)
+    if cached:
+        return cached
+    file_id = file_id_from_path(path)
+    path_file_id_map[path] = file_id
+    existing = file_id_map.get(file_id)
+    if existing and existing != path:
+        log_warn(f"file_id衝突: {file_id} {existing} -> {path}")
+    file_id_map[file_id] = path
+    return file_id
+
+
+def rebuild_detail_index_from_memory() -> None:
+    reset_detail_maps()
+    for entries in memory_pages.values():
+        for entry in entries:
+            file_id = entry.get("file_id") or register_file_id(entry["path"])
+            path_file_id_map[entry["path"]] = file_id
+            file_id_map[file_id] = entry["path"]
+            detail_entry_index[(file_id, str(entry.get("page")))] = entry
+
+
+def find_detail_entry(file_id: str, page: str) -> Dict | None:
+    key = (file_id, str(page))
+    entry = detail_entry_index.get(key)
+    if entry:
+        return entry
+    for entries in memory_pages.values():
+        for candidate in entries:
+            if candidate.get("file_id") == file_id and str(candidate.get("page")) == str(page):
+                detail_entry_index[key] = candidate
+                return candidate
+    return None
+
+
 def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict]) -> List[Dict]:
     store_normalized = env_bool("INDEX_STORE_NORMALIZED", True)
     pages: List[Dict] = []
     for path, meta in cache.items():
+        file_id = register_file_id(path)
         file_name = os.path.basename(path)
         is_pdf = file_name.lower().endswith(".pdf")
         ext = os.path.splitext(file_name)[1].lower()
@@ -2134,6 +2223,7 @@ def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict])
                 "path": path,
                 "displayPath": display_path,
                 "page": page_display,
+                "file_id": file_id,
                 "raw": raw_text,
                 "norm": norm_base,
                 "norm_jp": apply_space_mode(norm_base, "jp"),
@@ -2152,6 +2242,7 @@ def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict])
                         "norm_cf_all": apply_space_mode(norm_cf_base, "all"),
                     }
                 )
+            detail_entry_index[(file_id, str(page_display))] = entry
             pages.append(entry)
     return pages
 
@@ -2176,6 +2267,7 @@ def build_shared_blob(shared_path: Path, entries: List[Dict]) -> List[Dict]:
             "path": entry["path"],
             "displayPath": entry["displayPath"],
             "page": entry["page"],
+            "file_id": entry["file_id"],
             "folderId": entry["folderId"],
             "folderName": entry["folderName"],
             "raw_off": total_size,
@@ -2409,6 +2501,9 @@ folder_states: Dict[str, Dict] = {}
 memory_indexes: Dict[str, Dict[str, Dict]] = {}
 memory_pages: Dict[str, List[Dict]] = {}
 index_failures: Dict[str, Dict[str, str]] = {}
+file_id_map: Dict[str, str] = {}
+path_file_id_map: Dict[str, str] = {}
+detail_entry_index: Dict[Tuple[str, str], Dict] = {}
 cache_lock = threading.RLock()
 memory_cache: "MemoryCache | None" = None
 query_stats: Dict[str, Dict] = {}
@@ -2575,6 +2670,7 @@ def build_all_indexes():
     import shutil
 
     log_info("インデックス構築開始")
+    reset_detail_maps()
 
     # 初回起動時: 既存のフラットなインデックスを世代ディレクトリに移行
     migrate_legacy_indexes_to_generation()
@@ -3330,9 +3426,10 @@ def rebuild_fixed_cache():
             results, keywords = run_search_direct(entry["query"], params, target_ids)
         except Exception:
             continue
+        response_results = [build_lightweight_result(r) for r in results]
         payload = {
             "count": len(results),
-            "results": results,
+            "results": response_results,
             "keywords": keywords,
             "folder_ids": normalize_folder_ids(target_ids),
         }
@@ -3687,9 +3784,10 @@ async def search(req: SearchRequest):
         current_gen_name = get_current_generation_pointer()
         index_uuid = current_gen_name or "unknown"
 
+        response_results = [build_lightweight_result(r) for r in results]
         payload = {
             "count": len(results),
-            "results": results,
+            "results": response_results,
             "keywords": keywords_for_response,
             "folder_ids": normalize_folder_ids(target_ids),
             "index_uuid": index_uuid,
@@ -3719,6 +3817,31 @@ async def search(req: SearchRequest):
 
         # UI側でハイライトしやすいように検索キーワードも返す
         return payload
+
+
+@app.get("/api/detail")
+async def get_detail(
+    file_id: str = Query(...),
+    page: str = Query(...),
+    hit_pos: int = Query(-1, ge=-1),
+):
+    global rw_lock
+    if rw_lock is None:
+        raise HTTPException(status_code=503, detail="検索システムの初期化中です")
+    if not file_id:
+        raise HTTPException(status_code=400, detail="file_id が不正です")
+    async with rw_lock.read_lock():
+        if file_id not in file_id_map or not detail_entry_index:
+            rebuild_detail_index_from_memory()
+        entry = find_detail_entry(file_id, page)
+        if not entry:
+            raise HTTPException(status_code=404, detail="詳細が見つかりません")
+        detail_text = build_detail_text(entry["raw"], hit_pos)
+        return {
+            "file_id": file_id,
+            "page": entry.get("page"),
+            "detail": detail_text,
+        }
 
 
 @app.post("/api/export")
@@ -3789,6 +3912,7 @@ async def export_results(req: SearchRequest, format: str = "csv"):
         "result_count": len(results),
         "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+    export_results = [strip_internal_fields(r) for r in results]
 
     if format == "csv":
         # Create CSV
@@ -3812,7 +3936,7 @@ async def export_results(req: SearchRequest, format: str = "csv"):
         writer.writerow(["ファイル名", "パス", "ページ", "フォルダ", "スニペット", "詳細"])
 
         # Write results
-        for result in results:
+        for result in export_results:
             writer.writerow([
                 result.get("file", ""),
                 result.get("displayPath") or result.get("path", ""),
@@ -3838,7 +3962,7 @@ async def export_results(req: SearchRequest, format: str = "csv"):
         # Create JSON with metadata
         export_data = {
             "metadata": metadata,
-            "results": results,
+            "results": export_results,
         }
 
         json_content = json.dumps(export_data, ensure_ascii=False, indent=2)
