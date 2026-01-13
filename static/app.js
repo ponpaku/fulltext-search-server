@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.7
- * File Version: 1.2.9
+ * System Version: 1.1.8
+ * File Version: 1.3.0
  */
 
 const state = {
@@ -87,6 +87,11 @@ const clearFilterBtn = $('clearFilter');
 const closeFilterBtn = $('closeFilter');
 
 let lastNormalizeNotice = null;
+let lastHeartbeatAt = 0;
+
+const HEARTBEAT_INTERVAL_MS = 40000;
+const HEARTBEAT_MIN_GAP_MS = 10000;
+const CLIENT_ID_STORAGE_KEY = 'searchClientId';
 
 const showNotice = (message) => {
   if (!noticeBar) return;
@@ -102,6 +107,44 @@ const getNormalizeLabel = (mode) => ({
   exact: '厳格（最小整形）',
   normalized: 'ゆらぎ吸収',
 }[mode] || mode);
+
+const generateClientId = () => {
+  if (crypto?.randomUUID) return crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const getClientId = () => {
+  const saved = localStorage.getItem(CLIENT_ID_STORAGE_KEY);
+  if (saved) return saved;
+  const id = generateClientId();
+  localStorage.setItem(CLIENT_ID_STORAGE_KEY, id);
+  return id;
+};
+
+const sendHeartbeat = async (reason = 'interval') => {
+  if (document.hidden && reason === 'interval') return;
+  const now = Date.now();
+  if (now - lastHeartbeatAt < HEARTBEAT_MIN_GAP_MS) return;
+  lastHeartbeatAt = now;
+  try {
+    await fetch('/api/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: getClientId() }),
+    });
+  } catch (err) {
+    console.warn('heartbeat failed', err);
+  }
+};
+
+const startHeartbeat = () => {
+  sendHeartbeat('init');
+  setInterval(() => sendHeartbeat('interval'), HEARTBEAT_INTERVAL_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) sendHeartbeat('visible');
+  });
+  window.addEventListener('focus', () => sendHeartbeat('focus'));
+};
 
 // ═══════════════════════════════════════════════════════════════
 // CLIPBOARD PERMISSION
@@ -1311,6 +1354,7 @@ const runSearch = async (evt) => {
   }
 
   state.isSearching = true;
+  sendHeartbeat('search');
   resultsEl.innerHTML = `
     <div class="loading-state">
       <div class="loading-spinner"></div>
@@ -1537,6 +1581,7 @@ if (clearFilterBtn) {
 // ═══════════════════════════════════════════════════════════════
 
 window.addEventListener('DOMContentLoaded', () => {
+  startHeartbeat();
   initTheme();
   loadQueryHistory();
   setMode('AND');
