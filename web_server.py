@@ -21,8 +21,8 @@ from typing import Dict, List, Tuple
 
 from dotenv import load_dotenv
 
-SYSTEM_VERSION = "1.1.8"
-# File Version: 1.8.0
+SYSTEM_VERSION = "1.1.9"
+# File Version: 1.8.1
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -3300,6 +3300,13 @@ def heartbeat_ttl_sec() -> int:
     return max(1, env_int("HEARTBEAT_TTL_SEC", DEFAULT_HEARTBEAT_TTL_SEC))
 
 
+def heartbeat_max_clients() -> int:
+    env_max = os.getenv("HEARTBEAT_MAX_CLIENTS", "").strip()
+    if env_max.isdigit():
+        return max(1, int(env_max))
+    return max(1, total_worker_budget())
+
+
 def _prune_active_clients_locked(now: float, ttl_sec: int) -> None:
     expired = [cid for cid, last_seen in active_client_heartbeats.items() if now - last_seen > ttl_sec]
     for cid in expired:
@@ -3309,18 +3316,23 @@ def _prune_active_clients_locked(now: float, ttl_sec: int) -> None:
 def update_active_client(client_id: str) -> int:
     now = time.time()
     ttl_sec = heartbeat_ttl_sec()
+    max_clients = heartbeat_max_clients()
     with active_client_lock:
-        active_client_heartbeats[client_id] = now
         _prune_active_clients_locked(now, ttl_sec)
+        if client_id in active_client_heartbeats:
+            active_client_heartbeats[client_id] = now
+        elif len(active_client_heartbeats) < max_clients:
+            active_client_heartbeats[client_id] = now
         return len(active_client_heartbeats)
 
 
 def get_active_client_count() -> int:
     now = time.time()
     ttl_sec = heartbeat_ttl_sec()
+    max_clients = heartbeat_max_clients()
     with active_client_lock:
         _prune_active_clients_locked(now, ttl_sec)
-        return len(active_client_heartbeats)
+        return min(len(active_client_heartbeats), max_clients)
 
 
 def init_search_settings() -> Tuple[int, int, int]:

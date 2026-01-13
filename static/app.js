@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.8
- * File Version: 1.3.0
+ * System Version: 1.1.9
+ * File Version: 1.3.1
  */
 
 const state = {
@@ -113,11 +113,13 @@ const HEARTBEAT_INTERVAL_MS = 35000;
 const HEARTBEAT_JITTER_MS = 10000;
 const HEARTBEAT_MIN_GAP_MS = 5000;
 const HEARTBEAT_INTERACTION_GAP_MS = 15000;
+const HEARTBEAT_IDLE_THRESHOLD_MS = 90000;
 
 let heartbeatTimer = null;
 let heartbeatInFlight = false;
 let lastHeartbeatAt = 0;
 let lastInteractionHeartbeatAt = 0;
+let lastUserActivityAt = 0;
 
 const getClientId = () => {
   let clientId = localStorage.getItem(HEARTBEAT_CLIENT_KEY);
@@ -129,10 +131,11 @@ const getClientId = () => {
   return clientId;
 };
 
-const sendHeartbeat = async (reason = 'interval') => {
+const sendHeartbeat = async (reason = 'interval', force = false) => {
   if (heartbeatInFlight) return;
   const now = Date.now();
-  if (now - lastHeartbeatAt < HEARTBEAT_MIN_GAP_MS) return;
+  if (!force && now - lastHeartbeatAt < HEARTBEAT_MIN_GAP_MS) return;
+  if (!force && lastUserActivityAt && now - lastUserActivityAt > HEARTBEAT_IDLE_THRESHOLD_MS) return;
   heartbeatInFlight = true;
   try {
     await fetch('/api/heartbeat', {
@@ -140,10 +143,10 @@ const sendHeartbeat = async (reason = 'interval') => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: state.clientId }),
     });
-    lastHeartbeatAt = now;
   } catch (err) {
     console.warn('heartbeat failed', reason, err);
   } finally {
+    lastHeartbeatAt = now;
     heartbeatInFlight = false;
   }
 };
@@ -159,18 +162,26 @@ const scheduleHeartbeat = () => {
 
 const handleHeartbeatInteraction = () => {
   const now = Date.now();
+  lastUserActivityAt = now;
   if (now - lastInteractionHeartbeatAt < HEARTBEAT_INTERACTION_GAP_MS) return;
   lastInteractionHeartbeatAt = now;
-  sendHeartbeat('interaction');
+  sendHeartbeat('interaction', true);
 };
 
 const initHeartbeat = () => {
   state.clientId = getClientId();
-  sendHeartbeat('init');
+  lastUserActivityAt = Date.now();
+  sendHeartbeat('init', true);
   scheduleHeartbeat();
-  window.addEventListener('focus', () => sendHeartbeat('focus'));
+  window.addEventListener('focus', () => {
+    lastUserActivityAt = Date.now();
+    sendHeartbeat('focus', true);
+  });
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) sendHeartbeat('visible');
+    if (!document.hidden) {
+      lastUserActivityAt = Date.now();
+      sendHeartbeat('visible', true);
+    }
   });
   ['click', 'keydown', 'pointerdown', 'touchstart'].forEach((eventName) => {
     document.addEventListener(eventName, handleHeartbeatInteraction);
