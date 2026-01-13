@@ -2132,7 +2132,6 @@ def build_index_for_folder(folder: str, previous_failures: Dict[str, str] | None
 
     # 失敗情報のログ出力（運用把握のため）
     if failures:
-        log_warn(f"インデックス失敗ファイル: {folder} 失敗件数={len(failures)}")
         # 詳細は SEARCH_DEBUG=1 の時のみ（大量ログ対策）
         debug_mode = os.getenv("SEARCH_DEBUG", "").strip().lower() in {"1", "true", "yes"}
         if debug_mode:
