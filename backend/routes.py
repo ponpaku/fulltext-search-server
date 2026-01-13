@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 SYSTEM_VERSION = "1.1.11"
-# File Version: 1.0.0
+# File Version: 1.0.1
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -2409,11 +2409,9 @@ async def lifespan(app: FastAPI):
             f"検索実行モード: thread concurrency={concurrency} workers={workers} budget={budget}"
         )
     sync_state()
-    scheme = (
-        "https"
-        if (Path(os.getenv("CERT_DIR", "certs")) / "lan-cert.pem").exists()
-        else "http"
-    )
+    cert_dir = os.getenv("CERT_DIR", "certs")
+    cert_path = (BASE_DIR / cert_dir).resolve()
+    scheme = "https" if (cert_path / "lan-cert.pem").exists() else "http"
     urls = [
         f"{scheme}://{ip}:{os.getenv('PORT', '80')}"
         for ip in (get_ipv4_addresses() or ["0.0.0.0"])
