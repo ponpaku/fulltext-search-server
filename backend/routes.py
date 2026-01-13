@@ -1,3 +1,5 @@
+"""System Version: 1.1.11
+File Version: 1.9.0"""
 import asyncio
 import csv
 import gzip
@@ -19,22 +21,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from dotenv import load_dotenv, find_dotenv
-
 SYSTEM_VERSION = "1.1.11"
-# File Version: 1.8.3
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 import io
-try:
-    from colorama import Fore, Style, init as colorama_init
-except Exception:
-    Fore = None
-    Style = None
-    colorama_init = None
+
+from .config import (
+    BASE_DIR,
+    BUILD_DIR,
+    CACHE_DIR,
+    CURRENT_POINTER_FILE,
+    FIXED_CACHE_INDEX,
+    INDEX_DIR,
+    QUERY_STATS_PATH,
+    STATIC_DIR,
+    init_env,
+    parse_configured_folders,
+    parse_host_aliases,
+)
+from .context import build_config, build_state, AppContext
+from .utils import colorize_url, log_info, log_notice, log_success, log_warn
 
 # --- 外部依存ロジック ---
 from docx import Document
@@ -44,22 +53,9 @@ from pdfminer.layout import LAParams, LTTextBoxHorizontal, LTTextBoxVertical, LT
 from pdfminer.pdfpage import PDFPage
 
 # --- 定数 ---
-BASE_DIR = Path(__file__).resolve().parent
-INDEX_DIR = BASE_DIR / "indexes"
-INDEX_DIR.mkdir(exist_ok=True)
-
 ALLOWED_EXTS = {".pdf", ".docx", ".txt", ".csv", ".xlsx", ".xls"}
 INDEX_VERSION = "v3"
 SEARCH_CACHE_VERSION = "v2"
-CACHE_DIR = BASE_DIR / "cache"
-CACHE_DIR.mkdir(exist_ok=True)
-FIXED_CACHE_INDEX = CACHE_DIR / "fixed_cache_index.json"
-QUERY_STATS_PATH = CACHE_DIR / "query_stats.json"
-
-# --- 世代ディレクトリ定数 ---
-BUILD_DIR = INDEX_DIR / ".build"
-BUILD_DIR.mkdir(exist_ok=True)
-CURRENT_POINTER_FILE = INDEX_DIR / "current.txt"
 
 # --- 段階的ハッシング定数 ---
 FILE_STATE_FILENAME = "file_state.jsonl"
@@ -2420,6 +2416,7 @@ async def lifespan(app: FastAPI):
         log_info(
             f"検索実行モード: thread concurrency={concurrency} workers={workers} budget={budget}"
         )
+    refresh_app_context(app)
     scheme = (
         "https"
         if (Path(os.getenv("CERT_DIR", "certs")) / "lan-cert.pem").exists()
@@ -2449,68 +2446,6 @@ async def lifespan(app: FastAPI):
 
 
 # --- グローバル状態 ---
-app = FastAPI(title="Preloaded Folder Search", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-STATIC_DIR = Path("static")
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-
-def read_env_raw_value(var_name: str) -> str | None:
-    env_path = find_dotenv()
-    if not env_path:
-        return None
-    try:
-        with open(env_path, "r", encoding="utf-8") as file:
-            for line in file:
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                if stripped.lower().startswith("export "):
-                    stripped = stripped[7:].lstrip()
-                if "=" not in stripped:
-                    continue
-                key, value = stripped.split("=", 1)
-                if key.strip() != var_name:
-                    continue
-                value = value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                    value = value[1:-1]
-                return value
-    except OSError:
-        return None
-    return None
-
-
-had_search_folders = "SEARCH_FOLDERS" in os.environ
-raw_search_folders = read_env_raw_value("SEARCH_FOLDERS")
-load_dotenv()
-if not had_search_folders and raw_search_folders is not None:
-    os.environ["SEARCH_FOLDERS"] = raw_search_folders
-
-
-def parse_host_aliases() -> Dict[str, str]:
-    raw = os.getenv("SEARCH_FOLDER_ALIASES", "")
-    normalized = raw.replace("\n", ";").replace("|", ";").replace(",", ";")
-    aliases: Dict[str, str] = {}
-    for part in normalized.split(";"):
-        entry = part.strip()
-        if not entry or entry.startswith("#") or "=" not in entry:
-            continue
-        key, value = entry.split("=", 1)
-        key = key.strip().lower()
-        value = value.strip()
-        if key and value:
-            aliases[key] = value
-    return aliases
-
-
 def display_path_for_path(path: str, aliases: Dict[str, str]) -> str:
     if not aliases:
         return path
@@ -2529,46 +2464,7 @@ def display_path_for_path(path: str, aliases: Dict[str, str]) -> str:
     return f"{prefix}{alias}{rest or ''}"
 
 
-def parse_configured_folders() -> List[Dict[str, str]]:
-    raw = os.getenv("SEARCH_FOLDERS", "")
-    normalized = raw.replace("\n", ";").replace("|", ";").replace(",", ";")
-    folders: List[Dict[str, str]] = []
-    for part in normalized.split(";"):
-        entry = part.strip()
-        if not entry:
-            continue
-        if "#" in entry:
-            entry = entry.split("#", 1)[0].strip()
-        if not entry:
-            continue
-        label = None
-        if "=" in entry:
-            label, entry = entry.split("=", 1)
-            label = label.strip()
-            entry = entry.strip()
-        p = entry.strip().strip('"').strip("'")
-        if not p:
-            continue
-        # smb://host/share または smb:\host\share を UNC/posix 共有パスに変換
-        if p.lower().startswith("smb:"):
-            without_scheme = p[4:].lstrip("/\\")
-            if not without_scheme:
-                continue
-            if os.name == "nt":
-                unc_path = without_scheme.replace("/", "\\")
-                p = f"\\\\{unc_path}"
-            else:
-                posix_path = without_scheme.replace("\\", "/")
-                p = f"//{posix_path}"
-        folders.append(
-            {
-                "path": os.path.abspath(os.path.expanduser(p)),
-                "label": label or "",
-            }
-        )
-    return folders
-
-
+init_env()
 host_aliases = parse_host_aliases()
 configured_folders = parse_configured_folders()
 folder_states: Dict[str, Dict] = {}
@@ -2905,50 +2801,6 @@ def install_asyncio_exception_filter():
             loop.default_exception_handler(context)
 
     loop.set_exception_handler(handler)
-
-
-def log_info(message: str):
-    if colorama_init:
-        colorama_init()
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}")
-
-
-def log_warn(message: str):
-    if colorama_init:
-        colorama_init()
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    if Fore and Style:
-        print(f"{Fore.RED}[{timestamp}] {message}{Style.RESET_ALL}")
-    else:
-        print(f"[{timestamp}] {message}")
-
-
-def log_notice(message: str):
-    """黄色で表示する通知ログ（削除候補など、警告だが重要度は中程度）."""
-    if colorama_init:
-        colorama_init()
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    if Fore and Style:
-        print(f"{Fore.YELLOW}[{timestamp}] {message}{Style.RESET_ALL}")
-    else:
-        print(f"[{timestamp}] {message}")
-
-
-def log_success(message: str):
-    if colorama_init:
-        colorama_init()
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    if Fore and Style:
-        print(f"{Fore.GREEN}[{timestamp}] {message}{Style.RESET_ALL}")
-    else:
-        print(f"[{timestamp}] {message}")
-
-
-def colorize_url(url: str) -> str:
-    if Fore and Style:
-        return f"{Fore.CYAN}{url}{Style.RESET_ALL}"
-    return url
 
 
 def env_int(name: str, default: int) -> int:
@@ -3649,6 +3501,64 @@ def per_request_workers() -> int:
     return workers
 
 
+def refresh_app_context(app: FastAPI) -> None:
+    if not hasattr(app.state, "ctx"):
+        return
+    app.state.ctx.state = build_state(
+        folder_states=folder_states,
+        memory_indexes=memory_indexes,
+        memory_pages=memory_pages,
+        index_failures=index_failures,
+        memory_cache=memory_cache,
+        fixed_cache_index=fixed_cache_index,
+        query_stats=query_stats,
+        search_semaphore=search_semaphore,
+        rw_lock=rw_lock,
+        search_executor=search_executor,
+    )
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Preloaded Folder Search", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.state.ctx = AppContext(
+        config=build_config(
+            base_dir=BASE_DIR,
+            index_dir=INDEX_DIR,
+            cache_dir=CACHE_DIR,
+            static_dir=STATIC_DIR,
+            build_dir=BUILD_DIR,
+            current_pointer_file=CURRENT_POINTER_FILE,
+            system_version=SYSTEM_VERSION,
+            index_version=INDEX_VERSION,
+            cache_version=SEARCH_CACHE_VERSION,
+        ),
+        state=build_state(
+            folder_states=folder_states,
+            memory_indexes=memory_indexes,
+            memory_pages=memory_pages,
+            index_failures=index_failures,
+            memory_cache=memory_cache,
+            fixed_cache_index=fixed_cache_index,
+            query_stats=query_stats,
+            search_semaphore=search_semaphore,
+            rw_lock=rw_lock,
+            search_executor=search_executor,
+        ),
+    )
+    return app
+
+
+app = create_app()
+
+
 @app.get("/", response_class=FileResponse)
 async def read_root():
     index_file = STATIC_DIR / "index.html"
@@ -4093,55 +4003,3 @@ async def health():
     ready = all(m.get("ready") for m in folder_states.values()) if folder_states else False
     return {"status": "ok", "ready": ready}
 
-
-# --- 実行ヘルパー ---
-def run():
-    """ローカル開発用エントリポイント."""
-    import uvicorn
-    import signal
-
-    port = int(os.getenv("PORT", "80"))
-    cert_dir = os.getenv("CERT_DIR", "certs")
-    base_dir = Path(__file__).resolve().parent
-    cert_path = (base_dir / cert_dir).resolve()
-    cert_file = cert_path / "lan-cert.pem"
-    key_file = cert_path / "lan-key.pem"
-
-    ssl_kwargs = {}
-    if cert_file.exists() and key_file.exists():
-        ssl_kwargs = {
-            "ssl_certfile": str(cert_file),
-            "ssl_keyfile": str(key_file),
-        }
-
-    config = uvicorn.Config(
-        "web_server:app",
-        host="0.0.0.0",
-        port=port,
-        reload=False,
-        **ssl_kwargs,
-    )
-    server = uvicorn.Server(config)
-    server.install_signal_handlers = lambda: None
-    interrupt_count = {"count": 0}
-
-    def handle_interrupt(signum, frame):
-        interrupt_count["count"] += 1
-        if interrupt_count["count"] == 1:
-            log_info("Ctrl+Cを検知しました。もう一度Ctrl+Cで強制終了します。")
-            server.should_exit = True
-            return
-        log_info("Ctrl+Cを再度検知しました。強制終了します。")
-        os._exit(1)
-
-    signal.signal(signal.SIGINT, handle_interrupt)
-    try:
-        signal.signal(signal.SIGTERM, handle_interrupt)
-    except Exception:
-        pass
-
-    server.run()
-
-
-if __name__ == "__main__":
-    run()
