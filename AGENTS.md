@@ -1,6 +1,6 @@
 # System Overview
-System Version: 1.1.9
-AGENTS File Version: 1.0.1
+System Version: 1.1.11
+AGENTS File Version: 1.0.2
 - Stack: FastAPI backend with a static UI (`static/`) and in-memory search data.
 - Inputs: folders from `SEARCH_FOLDERS`; optional SMB path parsing and display aliases via `SEARCH_FOLDER_ALIASES`.
 - Indexing: extracts text from PDF/DOCX/TXT/CSV/XLSX/XLS and caches per-file text in gzip pickles under `indexes/`.

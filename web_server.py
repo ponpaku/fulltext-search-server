@@ -19,10 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-SYSTEM_VERSION = "1.1.9"
-# File Version: 1.8.1
+SYSTEM_VERSION = "1.1.11"
+# File Version: 1.8.3
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -2369,7 +2369,38 @@ app.add_middleware(
 STATIC_DIR = Path("static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+
+def read_env_raw_value(var_name: str) -> str | None:
+    env_path = find_dotenv()
+    if not env_path:
+        return None
+    try:
+        with open(env_path, "r", encoding="utf-8") as file:
+            for line in file:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if stripped.lower().startswith("export "):
+                    stripped = stripped[7:].lstrip()
+                if "=" not in stripped:
+                    continue
+                key, value = stripped.split("=", 1)
+                if key.strip() != var_name:
+                    continue
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                return value
+    except OSError:
+        return None
+    return None
+
+
+had_search_folders = "SEARCH_FOLDERS" in os.environ
+raw_search_folders = read_env_raw_value("SEARCH_FOLDERS")
 load_dotenv()
+if not had_search_folders and raw_search_folders is not None:
+    os.environ["SEARCH_FOLDERS"] = raw_search_folders
 
 
 def parse_host_aliases() -> Dict[str, str]:
@@ -2685,6 +2716,7 @@ def build_all_indexes():
             if not os.path.isdir(path):
                 meta["ready"] = False
                 meta["message"] = f"フォルダが見つかりません: {path}"
+                log_warn(f"フォルダが見つかりません: {path}")
                 continue
 
             meta["message"] = "インデックス構築中..."
