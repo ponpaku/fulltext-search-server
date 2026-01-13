@@ -1,7 +1,7 @@
 # Full-Search-PDFs
 
-System Version: 1.1.9
-README File Version: 1.1.8
+System Version: 1.1.11
+README File Version: 1.1.11
 
 ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。
 UI は `static/` 配下で提供されます。
@@ -59,8 +59,11 @@ chmod +x run.sh
 
 ## 設定（.env）
 ```env
-# 検索対象フォルダ（ラベル=パス）
-SEARCH_FOLDERS="規程=/path/to/a,議事録=/path/to/b"
+# 検索対象フォルダ（ラベル=パス、1行で指定）
+# Windowsは C:\Users\... をそのまま記載可（\ のエスケープ不要）
+SEARCH_FOLDERS="規程=C:\data\docs,議事録=//192.168.30.10/share/minutes"
+# 複数行に分割する設定は非対応（最初の1行のみ読み取り）
+# OS環境変数が設定済みの場合はそちらが優先されます
 
 # NAS名表示用（表示のみ）
 SEARCH_FOLDER_ALIASES="192.168.30.10=landisk-fukyo"
