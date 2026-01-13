@@ -1,6 +1,13 @@
 # 変更履歴
 
-System Version: 1.1.7
+System Version: 1.1.8
+
+## 1.1.8
+
+- 2026-01-12: 機能追加: アクティブクライアント数に応じた動的ワーカー割当と心拍を実装（issue #19 対応）。
+  - `/api/heartbeat` を追加し、TTL 内の心拍数から active_clients を算出
+  - heartbeats に基づき `workers_per_request` を動的に計算（ワーカー予算を分配）
+  - UI から 40 秒間隔の心拍送信とユーザー操作時の即時送信を追加
 
 ## 1.1.7
 

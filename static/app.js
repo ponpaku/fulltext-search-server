@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.7
- * File Version: 1.2.9
+ * System Version: 1.1.8
+ * File Version: 1.3.0
  */
 
 const state = {
@@ -36,6 +36,10 @@ const state = {
     extensions: [],
   },
 };
+
+const HEARTBEAT_INTERVAL_MS = 40000;
+const HEARTBEAT_ACTIVITY_THROTTLE_MS = 15000;
+const HEARTBEAT_STORAGE_KEY = 'ftsHeartbeatClientId';
 
 // DOM Elements
 const $ = (id) => document.getElementById(id);
@@ -87,6 +91,10 @@ const clearFilterBtn = $('clearFilter');
 const closeFilterBtn = $('closeFilter');
 
 let lastNormalizeNotice = null;
+let heartbeatTimer = null;
+let heartbeatClientId = null;
+let heartbeatInFlight = false;
+let lastHeartbeatAt = 0;
 
 const showNotice = (message) => {
   if (!noticeBar) return;
@@ -102,6 +110,45 @@ const getNormalizeLabel = (mode) => ({
   exact: '厳格（最小整形）',
   normalized: 'ゆらぎ吸収',
 }[mode] || mode);
+
+const getHeartbeatClientId = () => {
+  if (heartbeatClientId) return heartbeatClientId;
+  let stored = localStorage.getItem(HEARTBEAT_STORAGE_KEY);
+  if (!stored) {
+    stored = (crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+    localStorage.setItem(HEARTBEAT_STORAGE_KEY, stored);
+  }
+  heartbeatClientId = stored;
+  return stored;
+};
+
+const sendHeartbeat = async (force = false) => {
+  const now = Date.now();
+  if (!force && now - lastHeartbeatAt < HEARTBEAT_ACTIVITY_THROTTLE_MS) return;
+  if (heartbeatInFlight) return;
+  heartbeatInFlight = true;
+  try {
+    const payload = { client_id: getHeartbeatClientId() };
+    await fetch('/api/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    console.warn('heartbeat failed', err);
+  } finally {
+    heartbeatInFlight = false;
+    lastHeartbeatAt = now;
+  }
+};
+
+const startHeartbeat = () => {
+  sendHeartbeat(true);
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  heartbeatTimer = setInterval(() => {
+    sendHeartbeat(false);
+  }, HEARTBEAT_INTERVAL_MS);
+};
 
 // ═══════════════════════════════════════════════════════════════
 // CLIPBOARD PERMISSION
@@ -1319,6 +1366,7 @@ const runSearch = async (evt) => {
   `;
 
   try {
+    void sendHeartbeat(true);
     const res = await fetch('/api/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1541,6 +1589,19 @@ window.addEventListener('DOMContentLoaded', () => {
   loadQueryHistory();
   setMode('AND');
   loadFolders();
+  startHeartbeat();
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) sendHeartbeat(true);
+  });
+  window.addEventListener('focus', () => {
+    sendHeartbeat(true);
+  });
+  document.addEventListener('pointerdown', () => {
+    sendHeartbeat(false);
+  }, { passive: true });
+  document.addEventListener('keydown', () => {
+    sendHeartbeat(false);
+  });
   queryInput.focus();
   updateFolderToggleLabel();
 });
