@@ -1,7 +1,7 @@
 @echo off
 setlocal
-rem System Version: 1.0.0
-rem File Version: 1.0.0
+rem System Version: 1.1.11
+rem File Version: 1.0.1
 
 rem Root dir of this project
 set "PROJECT_ROOT=%~dp0"
@@ -18,5 +18,6 @@ if exist "%PROJECT_ROOT%requirements.txt" (
     pip install -r "%PROJECT_ROOT%requirements.txt"
 )
 
-python "%PROJECT_ROOT%web_server.py"
+if "%PORT%"=="" set PORT=80
+python -m uvicorn app:app --host 0.0.0.0 --port %PORT%
 popd

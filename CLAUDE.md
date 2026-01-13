@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-System Version: 1.1.1
-CLAUDE File Version: 1.0.0
+System Version: 1.1.11
+CLAUDE File Version: 1.0.1
 
 ## 1. Project Context
 - ローカル/社内フォルダの PDF/Office 文書を全文検索する FastAPI アプリ（UI は `static/` の静的配信）。
@@ -9,7 +9,7 @@ CLAUDE File Version: 1.0.0
 - 検索は正規化テキストの部分一致（AND/OR、AND時の範囲指定）で高速化を優先。
 
 ## 2. Project Map
-- `web_server.py`: API/検索/インデックス/キャッシュ/並列化の中核。
+- `app.py` / `backend/routes.py`: API/検索/インデックス/キャッシュ/並列化の中核。
 - `static/`: UI（`index.html`, `app.js`, `styles.css`）。
 - `indexes/`: 生成物。インデックス gzip pickle（コミットしない）。
 - `cache/`: 生成物。固定キャッシュ等（コミットしない）。
@@ -28,7 +28,7 @@ CLAUDE File Version: 1.0.0
 ## 4. Common Commands
 - 推奨起動（Linux/macOS）: `./run.sh`
 - 推奨起動（Windows）: `run.bat`
-- 直接起動: `python web_server.py`
+- 直接起動: `python -m uvicorn app:app --host 0.0.0.0 --port 80`
 - 依存導入: `python -m pip install -r requirements.txt`
 
 ## 5. Coding Standards
