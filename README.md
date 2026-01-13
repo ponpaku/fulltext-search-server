@@ -1,7 +1,7 @@
 # Full-Search-PDFs
 
-System Version: 1.1.6
-README File Version: 1.1.7
+System Version: 1.1.9
+README File Version: 1.1.8
 
 ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。
 UI は `static/` 配下で提供されます。
@@ -73,6 +73,12 @@ SEARCH_WORKERS=6
 
 # CPUコア数の上書き（開発機と本番機が違う場合）
 SEARCH_CPU_BUDGET=6
+
+# ハートビートのTTL（アクティブ判定、秒）
+HEARTBEAT_TTL_SEC=90
+
+# アクティブクライアント数の上限（未指定ならワーカー予算に準拠）
+HEARTBEAT_MAX_CLIENTS=6
 
 # 検索実行モード（thread/process）
 SEARCH_EXECUTION_MODE=thread
@@ -168,7 +174,10 @@ REBUILD_SCHEDULE="03:00"
 
 ## 検索の並列化
 - フォルダ単位は直列、ページ単位は並列
-- 並列数は `SEARCH_WORKERS` に固定
+- 並列数は「アクティブクライアント数」で動的に配分
+  - `SEARCH_WORKERS` は1リクエストあたりの上限
+  - アクティブ数は心拍（TTL内の client_id）で推定
+  - client_id はブラウザの localStorage に保存（同一ブラウザの複数タブは1クライアント扱い）
 - 同時リクエスト数は `SEARCH_CONCURRENCY` で制御
 
 ## 注意点

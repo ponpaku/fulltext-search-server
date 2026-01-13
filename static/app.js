@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.7
- * File Version: 1.2.9
+ * System Version: 1.1.9
+ * File Version: 1.3.1
  */
 
 const state = {
@@ -35,6 +35,7 @@ const state = {
     folders: [],
     extensions: [],
   },
+  clientId: null,
 };
 
 // DOM Elements
@@ -102,6 +103,90 @@ const getNormalizeLabel = (mode) => ({
   exact: '厳格（最小整形）',
   normalized: 'ゆらぎ吸収',
 }[mode] || mode);
+
+// ═══════════════════════════════════════════════════════════════
+// HEARTBEAT
+// ═══════════════════════════════════════════════════════════════
+
+const HEARTBEAT_CLIENT_KEY = 'fts_client_id';
+const HEARTBEAT_INTERVAL_MS = 35000;
+const HEARTBEAT_JITTER_MS = 10000;
+const HEARTBEAT_MIN_GAP_MS = 5000;
+const HEARTBEAT_INTERACTION_GAP_MS = 15000;
+const HEARTBEAT_IDLE_THRESHOLD_MS = 90000;
+
+let heartbeatTimer = null;
+let heartbeatInFlight = false;
+let lastHeartbeatAt = 0;
+let lastInteractionHeartbeatAt = 0;
+let lastUserActivityAt = 0;
+
+const getClientId = () => {
+  let clientId = localStorage.getItem(HEARTBEAT_CLIENT_KEY);
+  if (!clientId) {
+    clientId = window.crypto?.randomUUID?.()
+      || `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+    localStorage.setItem(HEARTBEAT_CLIENT_KEY, clientId);
+  }
+  return clientId;
+};
+
+const sendHeartbeat = async (reason = 'interval', force = false) => {
+  if (heartbeatInFlight) return;
+  const now = Date.now();
+  if (!force && now - lastHeartbeatAt < HEARTBEAT_MIN_GAP_MS) return;
+  if (!force && lastUserActivityAt && now - lastUserActivityAt > HEARTBEAT_IDLE_THRESHOLD_MS) return;
+  heartbeatInFlight = true;
+  try {
+    await fetch('/api/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: state.clientId }),
+    });
+  } catch (err) {
+    console.warn('heartbeat failed', reason, err);
+  } finally {
+    lastHeartbeatAt = now;
+    heartbeatInFlight = false;
+  }
+};
+
+const scheduleHeartbeat = () => {
+  const jitter = Math.floor(Math.random() * HEARTBEAT_JITTER_MS);
+  clearTimeout(heartbeatTimer);
+  heartbeatTimer = setTimeout(async () => {
+    await sendHeartbeat('interval');
+    scheduleHeartbeat();
+  }, HEARTBEAT_INTERVAL_MS + jitter);
+};
+
+const handleHeartbeatInteraction = () => {
+  const now = Date.now();
+  lastUserActivityAt = now;
+  if (now - lastInteractionHeartbeatAt < HEARTBEAT_INTERACTION_GAP_MS) return;
+  lastInteractionHeartbeatAt = now;
+  sendHeartbeat('interaction', true);
+};
+
+const initHeartbeat = () => {
+  state.clientId = getClientId();
+  lastUserActivityAt = Date.now();
+  sendHeartbeat('init', true);
+  scheduleHeartbeat();
+  window.addEventListener('focus', () => {
+    lastUserActivityAt = Date.now();
+    sendHeartbeat('focus', true);
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      lastUserActivityAt = Date.now();
+      sendHeartbeat('visible', true);
+    }
+  });
+  ['click', 'keydown', 'pointerdown', 'touchstart'].forEach((eventName) => {
+    document.addEventListener(eventName, handleHeartbeatInteraction);
+  });
+};
 
 // ═══════════════════════════════════════════════════════════════
 // CLIPBOARD PERMISSION
@@ -1539,6 +1624,7 @@ if (clearFilterBtn) {
 window.addEventListener('DOMContentLoaded', () => {
   initTheme();
   loadQueryHistory();
+  initHeartbeat();
   setMode('AND');
   loadFolders();
   queryInput.focus();

@@ -1,6 +1,6 @@
 # System Overview
-System Version: 1.1.1
-AGENTS File Version: 1.0.0
+System Version: 1.1.9
+AGENTS File Version: 1.0.1
 - Stack: FastAPI backend with a static UI (`static/`) and in-memory search data.
 - Inputs: folders from `SEARCH_FOLDERS`; optional SMB path parsing and display aliases via `SEARCH_FOLDER_ALIASES`.
 - Indexing: extracts text from PDF/DOCX/TXT/CSV/XLSX/XLS and caches per-file text in gzip pickles under `indexes/`.
@@ -22,7 +22,7 @@ AGENTS File Version: 1.0.0
 - Concurrency model:
   - Read/Write lock: read for searches, write for startup indexing.
   - Semaphore: limits concurrent search requests (`SEARCH_CONCURRENCY`).
-  - Worker budget per request: fixed at startup (`SEARCH_WORKERS` or `cpu_budget // SEARCH_CONCURRENCY`).
+- Worker budget per request: dynamic based on active client heartbeats (TTL-based), capped by `SEARCH_WORKERS`.
   - Folder-level search is serial; page-level is parallel (best for large folders).
   - Optional process mode: search execution can run in a ProcessPool (`SEARCH_EXECUTION_MODE=process`).
 
@@ -37,6 +37,8 @@ AGENTS File Version: 1.0.0
 - SEARCH_CONCURRENCY: concurrent search request limit (default: CPU count).
 - SEARCH_WORKERS: per-request worker count (optional; overrides auto).
 - SEARCH_EXECUTION_MODE: `thread` or `process` for search execution.
+- HEARTBEAT_TTL_SEC: active client TTL (seconds).
+- HEARTBEAT_MAX_CLIENTS: cap for active clients (defaults to worker budget).
 - CERT_DIR: SSL cert directory (`lan-cert.pem`, `lan-key.pem`).
 
 # Known Issues and Mitigations
