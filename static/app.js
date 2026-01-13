@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.7
- * File Version: 1.2.9
+ * System Version: 1.1.8
+ * File Version: 1.3.0
  */
 
 const state = {
@@ -35,6 +35,7 @@ const state = {
     folders: [],
     extensions: [],
   },
+  clientId: null,
 };
 
 // DOM Elements
@@ -102,6 +103,79 @@ const getNormalizeLabel = (mode) => ({
   exact: '厳格（最小整形）',
   normalized: 'ゆらぎ吸収',
 }[mode] || mode);
+
+// ═══════════════════════════════════════════════════════════════
+// HEARTBEAT
+// ═══════════════════════════════════════════════════════════════
+
+const HEARTBEAT_CLIENT_KEY = 'fts_client_id';
+const HEARTBEAT_INTERVAL_MS = 35000;
+const HEARTBEAT_JITTER_MS = 10000;
+const HEARTBEAT_MIN_GAP_MS = 5000;
+const HEARTBEAT_INTERACTION_GAP_MS = 15000;
+
+let heartbeatTimer = null;
+let heartbeatInFlight = false;
+let lastHeartbeatAt = 0;
+let lastInteractionHeartbeatAt = 0;
+
+const getClientId = () => {
+  let clientId = localStorage.getItem(HEARTBEAT_CLIENT_KEY);
+  if (!clientId) {
+    clientId = window.crypto?.randomUUID?.()
+      || `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+    localStorage.setItem(HEARTBEAT_CLIENT_KEY, clientId);
+  }
+  return clientId;
+};
+
+const sendHeartbeat = async (reason = 'interval') => {
+  if (heartbeatInFlight) return;
+  const now = Date.now();
+  if (now - lastHeartbeatAt < HEARTBEAT_MIN_GAP_MS) return;
+  heartbeatInFlight = true;
+  try {
+    await fetch('/api/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: state.clientId }),
+    });
+    lastHeartbeatAt = now;
+  } catch (err) {
+    console.warn('heartbeat failed', reason, err);
+  } finally {
+    heartbeatInFlight = false;
+  }
+};
+
+const scheduleHeartbeat = () => {
+  const jitter = Math.floor(Math.random() * HEARTBEAT_JITTER_MS);
+  clearTimeout(heartbeatTimer);
+  heartbeatTimer = setTimeout(async () => {
+    await sendHeartbeat('interval');
+    scheduleHeartbeat();
+  }, HEARTBEAT_INTERVAL_MS + jitter);
+};
+
+const handleHeartbeatInteraction = () => {
+  const now = Date.now();
+  if (now - lastInteractionHeartbeatAt < HEARTBEAT_INTERACTION_GAP_MS) return;
+  lastInteractionHeartbeatAt = now;
+  sendHeartbeat('interaction');
+};
+
+const initHeartbeat = () => {
+  state.clientId = getClientId();
+  sendHeartbeat('init');
+  scheduleHeartbeat();
+  window.addEventListener('focus', () => sendHeartbeat('focus'));
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) sendHeartbeat('visible');
+  });
+  ['click', 'keydown', 'pointerdown', 'touchstart'].forEach((eventName) => {
+    document.addEventListener(eventName, handleHeartbeatInteraction);
+  });
+};
 
 // ═══════════════════════════════════════════════════════════════
 // CLIPBOARD PERMISSION
@@ -1539,6 +1613,7 @@ if (clearFilterBtn) {
 window.addEventListener('DOMContentLoaded', () => {
   initTheme();
   loadQueryHistory();
+  initHeartbeat();
   setMode('AND');
   loadFolders();
   queryInput.focus();

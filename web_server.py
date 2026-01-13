@@ -21,8 +21,8 @@ from typing import Dict, List, Tuple
 
 from dotenv import load_dotenv
 
-SYSTEM_VERSION = "1.1.7"
-# File Version: 1.7.0
+SYSTEM_VERSION = "1.1.8"
+# File Version: 1.8.0
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -77,6 +77,7 @@ SEARCH_ENTRIES_CHUNK_THRESHOLD = 2000
 DEFAULT_CACHE_MAX_ENTRIES = 200
 DEFAULT_CACHE_MAX_MB = 200
 DEFAULT_CACHE_MAX_RESULT_KB = 2000
+DEFAULT_HEARTBEAT_TTL_SEC = 90
 
 
 # --- ユーティリティ ---
@@ -1227,7 +1228,7 @@ def run_search_direct(
         params.space_mode,
         params.normalize_mode,
     )
-    worker_count = search_worker_count
+    worker_count = per_request_workers()
     if search_execution_mode == "process" and search_executor:
         future = search_executor.submit(
             perform_search_process,
@@ -2350,6 +2351,11 @@ class SearchRequest(BaseModel):
             raise ValueError("normalize_mode は exact または normalized を指定してください")
         return mode
 
+
+class HeartbeatRequest(BaseModel):
+    client_id: str = Field(..., min_length=8, max_length=64)
+
+
 # --- グローバル状態 ---
 app = FastAPI(title="Preloaded Folder Search")
 app.add_middleware(
@@ -2471,6 +2477,8 @@ search_execution_mode = "thread"
 normalize_mode_warning_emitted = False
 file_id_map: Dict[str, Dict[str, str]] = {}
 file_id_lock = threading.RLock()
+active_client_lock = threading.Lock()
+active_client_heartbeats: Dict[str, float] = {}
 
 
 WORKER_MEMORY_PAGES: Dict[str, List[Dict]] = {}
@@ -3277,8 +3285,46 @@ def cpu_budget() -> int:
     return max(1, os.cpu_count() or 4)
 
 
+def total_worker_budget() -> int:
+    env_budget = os.getenv("SEARCH_CPU_BUDGET", "").strip()
+    if env_budget.isdigit():
+        return max(1, int(env_budget))
+    env_workers = os.getenv("SEARCH_WORKERS", "").strip()
+    env_conc = os.getenv("SEARCH_CONCURRENCY", "").strip()
+    if env_workers.isdigit() and env_conc.isdigit():
+        return max(1, int(env_workers) * max(1, int(env_conc)))
+    return max(1, os.cpu_count() or 4)
+
+
+def heartbeat_ttl_sec() -> int:
+    return max(1, env_int("HEARTBEAT_TTL_SEC", DEFAULT_HEARTBEAT_TTL_SEC))
+
+
+def _prune_active_clients_locked(now: float, ttl_sec: int) -> None:
+    expired = [cid for cid, last_seen in active_client_heartbeats.items() if now - last_seen > ttl_sec]
+    for cid in expired:
+        active_client_heartbeats.pop(cid, None)
+
+
+def update_active_client(client_id: str) -> int:
+    now = time.time()
+    ttl_sec = heartbeat_ttl_sec()
+    with active_client_lock:
+        active_client_heartbeats[client_id] = now
+        _prune_active_clients_locked(now, ttl_sec)
+        return len(active_client_heartbeats)
+
+
+def get_active_client_count() -> int:
+    now = time.time()
+    ttl_sec = heartbeat_ttl_sec()
+    with active_client_lock:
+        _prune_active_clients_locked(now, ttl_sec)
+        return len(active_client_heartbeats)
+
+
 def init_search_settings() -> Tuple[int, int, int]:
-    budget = cpu_budget()
+    budget = total_worker_budget()
     env_conc = os.getenv("SEARCH_CONCURRENCY", "").strip()
     concurrency = budget
     if env_conc.isdigit():
@@ -3456,14 +3502,15 @@ def rebuild_fixed_cache():
 
 
 def per_request_workers() -> int:
-    max_workers = cpu_budget()
+    budget = total_worker_budget()
+    active_clients = get_active_client_count()
     env_workers = os.getenv("SEARCH_WORKERS", "").strip()
+    max_per_request = budget
     if env_workers.isdigit():
-        return max(1, int(env_workers))
-    env_conc = os.getenv("SEARCH_CONCURRENCY", "").strip()
-    if env_conc.isdigit():
-        max_workers = max(1, max_workers // max(1, int(env_conc)))
-    return max(1, max_workers)
+        max_per_request = max(1, int(env_workers))
+    workers = budget // max(1, active_clients)
+    workers = max(1, min(workers, max_per_request))
+    return workers
 
 
 @app.on_event("startup")
@@ -3553,6 +3600,18 @@ async def read_root():
 @app.get("/api/folders")
 async def get_folders():
     return JSONResponse({"folders": describe_folder_state()})
+
+
+@app.post("/api/heartbeat")
+async def heartbeat(req: HeartbeatRequest):
+    active_clients = update_active_client(req.client_id)
+    return JSONResponse(
+        {
+            "status": "ok",
+            "active_clients": active_clients,
+            "ttl_sec": heartbeat_ttl_sec(),
+        }
+    )
 
 
 @app.get("/api/folders/{folder_id}/files")
@@ -3760,7 +3819,7 @@ async def search(req: SearchRequest):
             )
             raw_keywords = keywords
             keywords_for_response = keywords
-            worker_count = search_worker_count
+            worker_count = per_request_workers()
             loop = asyncio.get_running_loop()
             if os.getenv("SEARCH_DEBUG", "").strip().lower() in {"1", "true", "yes"}:
                 folder_debug = []
@@ -3794,7 +3853,8 @@ async def search(req: SearchRequest):
         elapsed = time.time() - start_time
         log_info(
             f"検索完了: folders={len(target_ids)} results={len(results)} "
-            f"mode={req.mode} normalize={normalize_mode} workers={worker_count} 時間={elapsed:.2f}s"
+            f"mode={req.mode} normalize={normalize_mode} workers={worker_count} "
+            f"active_clients={get_active_client_count()} 時間={elapsed:.2f}s"
         )
 
         # Get current index UUID
@@ -3862,7 +3922,7 @@ async def export_results(req: SearchRequest, format: str = "csv"):
                 normalize_mode,
             )
             raw_keywords = keywords
-            worker_count = search_worker_count
+            worker_count = per_request_workers()
             loop = asyncio.get_running_loop()
 
             if search_execution_mode == "process":
