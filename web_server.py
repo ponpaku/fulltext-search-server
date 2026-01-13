@@ -21,8 +21,8 @@ from typing import Dict, List, Tuple
 
 from dotenv import load_dotenv
 
-SYSTEM_VERSION = "1.1.6"
-# File Version: 1.6.9
+SYSTEM_VERSION = "1.1.7"
+# File Version: 1.7.0
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -50,7 +50,7 @@ INDEX_DIR.mkdir(exist_ok=True)
 
 ALLOWED_EXTS = {".pdf", ".docx", ".txt", ".csv", ".xlsx", ".xls"}
 INDEX_VERSION = "v3"
-SEARCH_CACHE_VERSION = "v1"
+SEARCH_CACHE_VERSION = "v2"
 CACHE_DIR = BASE_DIR / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 FIXED_CACHE_INDEX = CACHE_DIR / "fixed_cache_index.json"
@@ -607,25 +607,34 @@ def _find_raw_hit_position(
     return raw_hit_pos
 
 
+def build_detail_text(raw_text: str, raw_hit_pos: int) -> str:
+    detail_pos = raw_hit_pos if raw_hit_pos != -1 else 0
+    detail_start = max(0, detail_pos - DETAIL_CONTEXT_PREFIX)
+    detail_end = min(len(raw_text), detail_start + DETAIL_WINDOW_SIZE)
+    detail_text_raw = raw_text[detail_start:detail_end]
+    return normalize_detail_text(detail_text_raw)
+
+
 def _build_search_result(
     entry: Dict,
     raw_text: str,
     raw_for_positions: str,
     raw_hit_pos: int,
+    include_detail: bool,
 ) -> Dict:
     """検索結果のスニペットと詳細を生成する共通ヘルパー."""
     snippet_start = max(0, raw_hit_pos - SNIPPET_PREFIX_CHARS) if raw_hit_pos != -1 else 0
     snippet_end = min(len(raw_for_positions), snippet_start + SNIPPET_TOTAL_LENGTH)
     snippet_raw = raw_for_positions[snippet_start:snippet_end]
     snippet = f"...{normalize_snippet_text(snippet_raw)}..."
+    file_id = file_id_from_path(entry["path"])
+    detail_key = {
+        "file_id": file_id,
+        "page": entry["page"],
+        "hit_pos": raw_hit_pos if raw_hit_pos != -1 else 0,
+    }
 
-    detail_pos = raw_hit_pos if raw_hit_pos != -1 else 0
-    detail_start = max(0, detail_pos - DETAIL_CONTEXT_PREFIX)
-    detail_end = min(len(raw_text), detail_start + DETAIL_WINDOW_SIZE)
-    detail_text_raw = raw_text[detail_start:detail_end]
-    detail_text = normalize_detail_text(detail_text_raw)
-
-    return {
+    payload = {
         "file": entry["file"],
         "path": entry["path"],
         "displayPath": entry.get(
@@ -633,10 +642,13 @@ def _build_search_result(
         ),
         "page": entry["page"],
         "context": snippet,
-        "detail": detail_text,
+        "detail_key": detail_key,
         "folderId": entry["folderId"],
         "folderName": entry["folderName"],
     }
+    if include_detail:
+        payload["detail"] = build_detail_text(raw_text, raw_hit_pos)
+    return payload
 
 
 def search_text_logic(
@@ -647,6 +659,7 @@ def search_text_logic(
     range_limit: int,
     space_mode: str,
     normalize_mode: str,
+    include_detail: bool,
 ) -> List[Dict]:
     if not norm_keyword_groups:
         return []
@@ -737,7 +750,7 @@ def search_text_logic(
         return []
 
     raw_hit_pos = _find_raw_hit_position(raw_for_positions, raw_keywords, space_mode)
-    return [_build_search_result(entry, raw_text, raw_for_positions, raw_hit_pos)]
+    return [_build_search_result(entry, raw_text, raw_for_positions, raw_hit_pos, include_detail)]
 
 
 def search_entries_chunk(
@@ -748,6 +761,7 @@ def search_entries_chunk(
     range_limit: int,
     space_mode: str,
     normalize_mode: str,
+    include_detail: bool,
 ) -> List[Dict]:
     chunk_results: List[Dict] = []
     for entry in entries:
@@ -759,6 +773,7 @@ def search_entries_chunk(
             range_limit,
             space_mode,
             normalize_mode,
+            include_detail,
         )
         if hit:
             chunk_results.extend(hit)
@@ -823,6 +838,7 @@ def search_text_logic_shared(
     range_limit: int,
     space_mode: str,
     normalize_mode: str,
+    include_detail: bool,
 ) -> List[Dict]:
     if not norm_keyword_groups_bytes:
         return []
@@ -884,7 +900,7 @@ def search_text_logic_shared(
     raw_for_positions = normalize_invisible_separators(raw_text)
 
     raw_hit_pos = _find_raw_hit_position(raw_for_positions, raw_keywords, space_mode)
-    return [_build_search_result(entry, raw_text, raw_for_positions, raw_hit_pos)]
+    return [_build_search_result(entry, raw_text, raw_for_positions, raw_hit_pos, include_detail)]
 
 
 def search_entries_chunk_shared(
@@ -897,6 +913,7 @@ def search_entries_chunk_shared(
     range_limit: int,
     space_mode: str,
     normalize_mode: str,
+    include_detail: bool,
 ) -> List[Dict]:
     chunk_results: List[Dict] = []
     for entry in entries:
@@ -910,6 +927,7 @@ def search_entries_chunk_shared(
             range_limit,
             space_mode,
             normalize_mode,
+            include_detail,
         )
         if hit:
             chunk_results.extend(hit)
@@ -922,6 +940,7 @@ def perform_search(
     norm_keyword_groups: List[List[str]],
     raw_keywords: List[str],
     worker_count: int,
+    include_detail: bool,
 ) -> List[Dict]:
     results: List[Dict] = []
 
@@ -956,6 +975,7 @@ def perform_search(
                         params.range_limit,
                         params.space_mode,
                         params.normalize_mode,
+                        include_detail,
                     )
                     for chunk in chunks
                 ]
@@ -975,6 +995,7 @@ def perform_search(
                 params.range_limit,
                 params.space_mode,
                 params.normalize_mode,
+                include_detail,
             )
         if os.getenv("SEARCH_DEBUG", "").strip().lower() in {"1", "true", "yes"}:
             log_info(
@@ -1039,6 +1060,7 @@ def perform_search_process(
     norm_keyword_groups: List[List[str]],
     raw_keywords: List[str],
     worker_count: int,
+    include_detail: bool,
 ) -> List[Dict]:
     if PROCESS_SHARED:
         return perform_search_process_shared(
@@ -1047,6 +1069,7 @@ def perform_search_process(
             norm_keyword_groups,
             raw_keywords,
             worker_count,
+            include_detail,
         )
 
     results: List[Dict] = []
@@ -1082,6 +1105,7 @@ def perform_search_process(
                         params.range_limit,
                         params.space_mode,
                         params.normalize_mode,
+                        include_detail,
                     )
                     for chunk in chunks
                 ]
@@ -1101,6 +1125,7 @@ def perform_search_process(
                 params.range_limit,
                 params.space_mode,
                 params.normalize_mode,
+                include_detail,
             )
         return folder_results
 
@@ -1120,6 +1145,7 @@ def perform_search_process_shared(
     norm_keyword_groups: List[List[str]],
     raw_keywords: List[str],
     worker_count: int,
+    include_detail: bool,
 ) -> List[Dict]:
     results: List[Dict] = []
     norm_keyword_groups_bytes = [
@@ -1153,6 +1179,7 @@ def perform_search_process_shared(
                         params.range_limit,
                         params.space_mode,
                         params.normalize_mode,
+                        include_detail,
                     )
                     for chunk in chunks
                 ]
@@ -1174,6 +1201,7 @@ def perform_search_process_shared(
                 params.range_limit,
                 params.space_mode,
                 params.normalize_mode,
+                include_detail,
             )
         return folder_results
 
@@ -1191,6 +1219,7 @@ def run_search_direct(
     query: str,
     params: "SearchParams",
     target_ids: List[str],
+    include_detail: bool = False,
 ) -> Tuple[List[Dict], List[str]]:
     raw_keywords, norm_keyword_groups = build_query_groups(
         query,
@@ -1206,6 +1235,7 @@ def run_search_direct(
             norm_keyword_groups,
             raw_keywords,
             worker_count,
+            include_detail,
         )
         results = future.result()
     else:
@@ -1215,6 +1245,7 @@ def run_search_direct(
             norm_keyword_groups,
             raw_keywords,
             worker_count,
+            include_detail,
         )
     return results, raw_keywords
 
@@ -2120,6 +2151,7 @@ def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict])
         ext = os.path.splitext(file_name)[1].lower()
         is_excel = ext in {".xlsx", ".xls"}
         display_path = display_path_for_path(path, host_aliases)
+        file_id = file_id_from_path(path)
         for page_num, raw_text in meta.get("data", {}).items():
             if not raw_text:
                 continue
@@ -2129,11 +2161,14 @@ def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict])
                 normalize_text_nfkc_casefold(raw_text) if store_normalized else ""
             )
             page_display = "-" if not (is_pdf or is_excel) else page_num
+            page_key = normalize_page_key(page_display)
+            register_detail_entry(file_id, folder_id, path, page_key, raw_text)
             entry = {
                 "file": file_name,
                 "path": path,
                 "displayPath": display_path,
                 "page": page_display,
+                "fileId": file_id,
                 "raw": raw_text,
                 "norm": norm_base,
                 "norm_jp": apply_space_mode(norm_base, "jp"),
@@ -2436,6 +2471,9 @@ normalize_mode_warning_emitted = False
 
 WORKER_MEMORY_PAGES: Dict[str, List[Dict]] = {}
 WORKER_FOLDER_META: Dict[str, Tuple[str, str]] = {}
+detail_lookup: Dict[Tuple[str, str], str] = {}
+file_id_map: Dict[str, Dict[str, str]] = {}
+detail_lookup_lock = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -2477,6 +2515,55 @@ class AsyncRWLock:
 
 def folder_id_from_path(path: str) -> str:
     return hashlib.sha256(path.encode("utf-8")).hexdigest()[:10]
+
+
+def file_id_from_path(path: str) -> str:
+    return hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]
+
+
+def normalize_page_key(page: object) -> str:
+    return str(page)
+
+
+def register_detail_entry(file_id: str, folder_id: str, path: str, page_key: str, raw_text: str) -> None:
+    with detail_lookup_lock:
+        file_id_map[file_id] = {"path": path, "folder_id": folder_id}
+        detail_lookup[(file_id, page_key)] = raw_text
+
+
+def clear_detail_maps() -> None:
+    with detail_lookup_lock:
+        detail_lookup.clear()
+        file_id_map.clear()
+
+
+def lookup_raw_text(file_id: str, page_key: str) -> str | None:
+    with detail_lookup_lock:
+        raw_text = detail_lookup.get((file_id, page_key))
+        if raw_text is not None:
+            return raw_text
+        meta = file_id_map.get(file_id)
+    if not meta:
+        return None
+    folder_id = meta["folder_id"]
+    path = meta["path"]
+    cache = memory_indexes.get(folder_id, {})
+    if not cache:
+        return None
+    file_meta = cache.get(path)
+    if not file_meta:
+        return None
+    data = file_meta.get("data", {})
+    candidates = [page_key]
+    if page_key.isdigit():
+        candidates.append(int(page_key))
+    for candidate in candidates:
+        raw_text = data.get(candidate)
+        if raw_text:
+            with detail_lookup_lock:
+                detail_lookup[(file_id, page_key)] = raw_text
+            return raw_text
+    return None
 
 
 def describe_folder_state() -> List[Dict]:
@@ -2641,6 +2728,7 @@ def build_all_indexes():
         log_info(f"currentポインター更新: {old_gen_name or 'なし'} → gen_{gen_name}")
 
         # メモリ内のインデックスとページを更新
+        clear_detail_maps()
         for folder_id, cache in temp_indexes.items():
             memory_indexes[folder_id] = cache
             memory_pages[folder_id] = build_memory_pages(
@@ -3666,6 +3754,7 @@ async def search(req: SearchRequest):
                     norm_keyword_groups,
                     raw_keywords,
                     worker_count,
+                    False,
                 )
             else:
                 results = await loop.run_in_executor(
@@ -3676,6 +3765,7 @@ async def search(req: SearchRequest):
                     norm_keyword_groups,
                     raw_keywords,
                     worker_count,
+                    False,
                 )
         elapsed = time.time() - start_time
         log_info(
@@ -3721,6 +3811,29 @@ async def search(req: SearchRequest):
         return payload
 
 
+@app.get("/api/detail")
+async def get_detail(file_id: str, page: str, hit_pos: int = 0):
+    global rw_lock
+    if rw_lock is None:
+        raise HTTPException(status_code=503, detail="検索システムの初期化中です")
+    if not file_id:
+        raise HTTPException(status_code=400, detail="file_id が不正です")
+    if page is None:
+        raise HTTPException(status_code=400, detail="page が不正です")
+
+    page_key = normalize_page_key(page)
+    hit_pos = hit_pos if hit_pos >= 0 else 0
+
+    async with rw_lock.read_lock():
+        raw_text = lookup_raw_text(file_id, page_key)
+
+    if raw_text is None:
+        raise HTTPException(status_code=404, detail="詳細が見つかりません")
+
+    detail_text = build_detail_text(raw_text, hit_pos)
+    return {"file_id": file_id, "page": page, "detail": detail_text}
+
+
 @app.post("/api/export")
 async def export_results(req: SearchRequest, format: str = "csv"):
     """検索結果をCSV/JSON形式でエクスポートする"""
@@ -3760,6 +3873,7 @@ async def export_results(req: SearchRequest, format: str = "csv"):
                     norm_keyword_groups,
                     raw_keywords,
                     worker_count,
+                    True,
                 )
             else:
                 results = await loop.run_in_executor(
@@ -3770,6 +3884,7 @@ async def export_results(req: SearchRequest, format: str = "csv"):
                     norm_keyword_groups,
                     raw_keywords,
                     worker_count,
+                    True,
                 )
 
     # Get current index UUID

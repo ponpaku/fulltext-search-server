@@ -1,6 +1,14 @@
 # 変更履歴
 
-System Version: 1.1.6
+System Version: 1.1.7
+
+## 1.1.7
+
+- 2026-01-12: 改善: 検索レスポンスの detail を遅延取得に変更（issue #10 対応）。
+  - `/api/search` は detail を除外し、`detail_key` を返すように変更
+  - `/api/detail` を追加し、GET で detail を取得
+  - UIはカード展開時に detail を取得し、ハイライト表示を維持
+  - 検索キャッシュのスキーマを更新（detail除外）
 
 ## 1.1.6
 

@@ -1,7 +1,7 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.1.6
- * File Version: 1.2.8
+ * System Version: 1.1.7
+ * File Version: 1.3.0
  */
 
 const state = {
@@ -25,6 +25,8 @@ const state = {
   queryHistory: [],
   historyModalOpen: false,
   currentIndexUuid: null,
+  detailCache: new Map(),
+  detailRequests: new Map(),
   filter: {
     folders: new Set(),
     extensions: new Set(),
@@ -743,6 +745,93 @@ const highlightText = (text, keywords) => {
   return result;
 };
 
+const buildDetailCacheKey = (detailKey) => (
+  `${detailKey.file_id}:${detailKey.page}:${detailKey.hit_pos ?? 0}`
+);
+
+const buildDetailAttributes = (detailKey) => {
+  if (!detailKey) return '';
+  const page = detailKey.page ?? '';
+  const hitPos = detailKey.hit_pos ?? 0;
+  return `data-file-id="${detailKey.file_id}" data-page="${page}" data-hit-pos="${hitPos}"`;
+};
+
+const getDetailKeyFromElement = (detailEl) => {
+  if (!detailEl?.dataset) return null;
+  const fileId = detailEl.dataset.fileId;
+  if (!fileId) return null;
+  return {
+    file_id: fileId,
+    page: detailEl.dataset.page ?? '',
+    hit_pos: detailEl.dataset.hitPos ? parseInt(detailEl.dataset.hitPos, 10) : 0,
+  };
+};
+
+const fetchDetail = async (detailKey) => {
+  const cacheKey = buildDetailCacheKey(detailKey);
+  if (state.detailCache.has(cacheKey)) return state.detailCache.get(cacheKey);
+  if (state.detailRequests.has(cacheKey)) return state.detailRequests.get(cacheKey);
+
+  const params = new URLSearchParams({
+    file_id: detailKey.file_id,
+    page: detailKey.page,
+    hit_pos: String(detailKey.hit_pos ?? 0),
+  });
+
+  const request = (async () => {
+    const res = await fetch(`/api/detail?${params.toString()}`);
+    if (!res.ok) {
+      let err = {};
+      try {
+        err = await res.json();
+      } catch (_) {
+        err = {};
+      }
+      throw new Error(err.detail || '詳細の取得に失敗しました');
+    }
+    const data = await res.json();
+    return data.detail ?? '';
+  })();
+
+  state.detailRequests.set(cacheKey, request);
+  try {
+    const detail = await request;
+    state.detailCache.set(cacheKey, detail);
+    return detail;
+  } finally {
+    state.detailRequests.delete(cacheKey);
+  }
+};
+
+const ensureDetailLoaded = async (detailEl) => {
+  if (!detailEl) return;
+  if (detailEl.dataset.detailLoaded === 'true') return;
+  if (detailEl.dataset.detailLoading === 'true') return;
+  const detailKey = getDetailKeyFromElement(detailEl);
+  if (!detailKey) return;
+
+  detailEl.dataset.detailLoading = 'true';
+  const detailTextEl = detailEl.querySelector('.detail-text');
+  if (detailTextEl) {
+    detailTextEl.textContent = '詳細を読み込み中...';
+  }
+
+  try {
+    const detail = await fetchDetail(detailKey);
+    if (detailTextEl) {
+      detailTextEl.innerHTML = highlightText(detail, state.keywords);
+    }
+    detailEl.dataset.detailLoaded = 'true';
+  } catch (err) {
+    console.error(err);
+    if (detailTextEl) {
+      detailTextEl.textContent = '詳細の取得に失敗しました';
+    }
+  } finally {
+    detailEl.dataset.detailLoading = 'false';
+  }
+};
+
 // ═══════════════════════════════════════════════════════════════
 // RENDER RESULTS
 // ═══════════════════════════════════════════════════════════════
@@ -768,8 +857,8 @@ const renderHitCards = (items) => {
         </div>
       </div>
       <div class="result-context">${highlightText(r.context, state.keywords)}</div>
-      <div class="result-detail">
-        <div class="detail-text">${highlightText(r.detail || r.context, state.keywords)}</div>
+      <div class="result-detail" ${buildDetailAttributes(r.detail_key)} data-detail-loaded="false">
+        <div class="detail-text">${highlightText(r.context, state.keywords)}</div>
         <div class="detail-meta">
           <span>フォルダ: ${r.folderName || r.folderId}</span>
           <span>ページ: ${r.page}</span>
@@ -812,8 +901,8 @@ const renderFileCards = (groups) => {
               </div>
               <div class="mini-snippet">${highlightText(hit.context, state.keywords)}</div>
             </div>
-            <div class="result-detail">
-              <div class="detail-text">${highlightText(hit.detail || hit.context, state.keywords)}</div>
+            <div class="result-detail" ${buildDetailAttributes(hit.detail_key)} data-detail-loaded="false">
+              <div class="detail-text">${highlightText(hit.context, state.keywords)}</div>
               <div class="detail-meta">
                 <span>ページ: ${hit.page}</span>
                 <span class="truncate">パス: ${hit.displayPath || hit.path}</span>
@@ -859,7 +948,12 @@ const bindResultHandlers = (root) => {
       if (e.target.closest('.copy-btn')) return;
       if (e.target.closest('.hit-item')) return;
       card.classList.toggle('expanded');
-      setExpandHint(card, card.classList.contains('expanded'));
+      const expanded = card.classList.contains('expanded');
+      setExpandHint(card, expanded);
+      if (expanded) {
+        const detailEl = card.querySelector('.result-detail');
+        ensureDetailLoaded(detailEl);
+      }
     });
   });
 
@@ -871,6 +965,10 @@ const bindResultHandlers = (root) => {
       if (card) {
         card.classList.add('expanded');
         setExpandHint(card, true);
+      }
+      if (item.classList.contains('expanded')) {
+        const detailEl = item.querySelector('.result-detail');
+        ensureDetailLoaded(detailEl);
       }
     });
   });
@@ -930,6 +1028,8 @@ const renderResults = (payload) => {
     state.filteredResults = null;
     state.filter.folders = new Set();
     state.filter.extensions = new Set();
+    state.detailCache = new Map();
+    state.detailRequests = new Map();
     buildFilterOptions();
     renderFilterOptions();
   }
