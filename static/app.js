@@ -35,6 +35,8 @@ const state = {
     extensions: [],
   },
   clientId: null,
+  connectionStatus: 'connecting',
+  folderLoadState: 'loading',
 };
 
 // DOM Elements
@@ -113,12 +115,35 @@ const HEARTBEAT_JITTER_MS = 10000;
 const HEARTBEAT_MIN_GAP_MS = 5000;
 const HEARTBEAT_INTERACTION_GAP_MS = 15000;
 const HEARTBEAT_IDLE_THRESHOLD_MS = 90000;
+const HEARTBEAT_FAIL_THRESHOLD = 2;
+const HEARTBEAT_STALE_MULTIPLIER = 2;
+const HEARTBEAT_STALE_MS = HEARTBEAT_INTERVAL_MS * HEARTBEAT_STALE_MULTIPLIER + HEARTBEAT_JITTER_MS;
+const HEALTH_CHECK_INTERVAL_MS = 10000;
+const HEALTH_CHECK_JITTER_MS = 4000;
 
 let heartbeatTimer = null;
 let heartbeatInFlight = false;
+let heartbeatEnabled = false;
 let lastHeartbeatAt = 0;
+let lastHeartbeatSuccessAt = 0;
 let lastInteractionHeartbeatAt = 0;
 let lastUserActivityAt = 0;
+let consecutiveHeartbeatFailures = 0;
+let healthTimer = null;
+let healthInFlight = false;
+
+const CONNECTION_STATUS = {
+  connecting: 'connecting',
+  connected: 'connected',
+  recovering: 'recovering',
+  disconnected: 'disconnected',
+};
+
+const setConnectionStatus = (status) => {
+  if (state.connectionStatus === status) return;
+  state.connectionStatus = status;
+  renderStatusChips();
+};
 
 const getClientId = () => {
   let clientId = localStorage.getItem(HEARTBEAT_CLIENT_KEY);
@@ -131,19 +156,31 @@ const getClientId = () => {
 };
 
 const sendHeartbeat = async (reason = 'interval', force = false) => {
+  if (!heartbeatEnabled) return;
   if (heartbeatInFlight) return;
   const now = Date.now();
   if (!force && now - lastHeartbeatAt < HEARTBEAT_MIN_GAP_MS) return;
   if (!force && lastUserActivityAt && now - lastUserActivityAt > HEARTBEAT_IDLE_THRESHOLD_MS) return;
   heartbeatInFlight = true;
   try {
-    await fetch('/api/heartbeat', {
+    const res = await fetch('/api/heartbeat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: state.clientId }),
     });
+    if (!res.ok) {
+      throw new Error(`heartbeat failed: ${res.status}`);
+    }
+    lastHeartbeatSuccessAt = now;
+    consecutiveHeartbeatFailures = 0;
+    setConnectionStatus(CONNECTION_STATUS.connected);
   } catch (err) {
     console.warn('heartbeat failed', reason, err);
+    consecutiveHeartbeatFailures += 1;
+    const stale = lastHeartbeatSuccessAt && now - lastHeartbeatSuccessAt > HEARTBEAT_STALE_MS;
+    if (consecutiveHeartbeatFailures >= HEARTBEAT_FAIL_THRESHOLD || stale) {
+      transitionToDisconnected();
+    }
   } finally {
     lastHeartbeatAt = now;
     heartbeatInFlight = false;
@@ -151,6 +188,7 @@ const sendHeartbeat = async (reason = 'interval', force = false) => {
 };
 
 const scheduleHeartbeat = () => {
+  if (!heartbeatEnabled) return;
   const jitter = Math.floor(Math.random() * HEARTBEAT_JITTER_MS);
   clearTimeout(heartbeatTimer);
   heartbeatTimer = setTimeout(async () => {
@@ -160,6 +198,7 @@ const scheduleHeartbeat = () => {
 };
 
 const handleHeartbeatInteraction = () => {
+  if (!heartbeatEnabled) return;
   const now = Date.now();
   lastUserActivityAt = now;
   if (now - lastInteractionHeartbeatAt < HEARTBEAT_INTERACTION_GAP_MS) return;
@@ -167,9 +206,78 @@ const handleHeartbeatInteraction = () => {
   sendHeartbeat('interaction', true);
 };
 
+const stopHeartbeat = () => {
+  heartbeatEnabled = false;
+  clearTimeout(heartbeatTimer);
+  heartbeatTimer = null;
+};
+
+const startHeartbeat = () => {
+  if (heartbeatEnabled) return;
+  heartbeatEnabled = true;
+  scheduleHeartbeat();
+};
+
+const stopHealthPolling = () => {
+  clearTimeout(healthTimer);
+  healthTimer = null;
+};
+
+const scheduleHealthCheck = () => {
+  const jitter = Math.floor(Math.random() * HEALTH_CHECK_JITTER_MS);
+  clearTimeout(healthTimer);
+  healthTimer = setTimeout(async () => {
+    await checkHealth();
+    scheduleHealthCheck();
+  }, HEALTH_CHECK_INTERVAL_MS + jitter);
+};
+
+const startHealthPolling = () => {
+  if (healthTimer) return;
+  scheduleHealthCheck();
+};
+
+const transitionToDisconnected = () => {
+  if (state.connectionStatus === CONNECTION_STATUS.disconnected) return;
+  setConnectionStatus(CONNECTION_STATUS.disconnected);
+  stopHeartbeat();
+  startHealthPolling();
+};
+
+const checkHealth = async () => {
+  if (healthInFlight) return;
+  healthInFlight = true;
+  setConnectionStatus(CONNECTION_STATUS.recovering);
+  try {
+    const res = await fetch('/api/health');
+    if (!res.ok) {
+      throw new Error(`health failed: ${res.status}`);
+    }
+    const data = await res.json();
+    if (data?.status === 'ok') {
+      const refreshed = await loadFolders();
+      if (refreshed) {
+        lastHeartbeatSuccessAt = Date.now();
+        consecutiveHeartbeatFailures = 0;
+        stopHealthPolling();
+        setConnectionStatus(CONNECTION_STATUS.connected);
+        startHeartbeat();
+        sendHeartbeat('recover', true);
+      }
+    }
+  } catch (err) {
+    console.warn('health check failed', err);
+    setConnectionStatus(CONNECTION_STATUS.disconnected);
+  } finally {
+    healthInFlight = false;
+  }
+};
+
 const initHeartbeat = () => {
   state.clientId = getClientId();
   lastUserActivityAt = Date.now();
+  setConnectionStatus(CONNECTION_STATUS.connecting);
+  heartbeatEnabled = true;
   sendHeartbeat('init', true);
   scheduleHeartbeat();
   window.addEventListener('focus', () => {
@@ -349,22 +457,44 @@ const clearUnpinnedHistory = () => {
 // STATUS CHIPS
 // ═══════════════════════════════════════════════════════════════
 
-const updateStatusChips = (folders) => {
-  const total = folders.length;
-  const ready = folders.filter(f => f.ready).length;
-  
+const renderStatusChips = () => {
+  const total = state.folders.length;
+  const ready = state.folders.filter(f => f.ready).length;
+  const connectionChip = getConnectionChip();
+  const folderChip = getFolderStatusChip(total, ready);
+  statusChips.innerHTML = `${connectionChip}${folderChip}`;
+};
+
+const getConnectionChip = () => {
+  const labels = {
+    [CONNECTION_STATUS.connecting]: { label: '接続確認中', className: '' },
+    [CONNECTION_STATUS.connected]: { label: '接続中', className: 'positive' },
+    [CONNECTION_STATUS.recovering]: { label: '復旧中', className: 'warning' },
+    [CONNECTION_STATUS.disconnected]: { label: '接続失敗', className: 'error' },
+  };
+  const info = labels[state.connectionStatus] || labels[CONNECTION_STATUS.connecting];
+  return `<span class="chip ${info.className}">${info.label}</span>`;
+};
+
+const getFolderStatusChip = (total, ready) => {
+  if (state.folderLoadState === 'loading') {
+    return '<span class="chip">読込中...</span>';
+  }
+  if (state.folderLoadState === 'error') {
+    return '<span class="chip error">フォルダ取得エラー</span>';
+  }
   if (total === 0) {
-    statusChips.innerHTML = '<span class="chip error">未設定</span>';
-  } else if (ready === total) {
-    statusChips.innerHTML = `
+    return '<span class="chip error">未設定</span>';
+  }
+  if (ready === total) {
+    return `
       <span class="chip positive">${ready}/${total} 準備完了</span>
       <span class="chip">検索可能</span>
     `;
-  } else {
-    statusChips.innerHTML = `
-      <span class="chip warning">${ready}/${total} 準備中</span>
-    `;
   }
+  return `
+    <span class="chip warning">${ready}/${total} 準備中</span>
+  `;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -464,16 +594,20 @@ const loadFolders = async () => {
   folderStatusEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
   folderListEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
   refreshBtn.disabled = true;
+  state.folderLoadState = 'loading';
+  renderStatusChips();
 
   try {
     const res = await fetch('/api/folders');
     const data = await res.json();
     state.folders = data.folders || [];
     state.selected = new Set(state.folders.filter(f => f.ready).map(f => f.id));
-    
-    updateStatusChips(state.folders);
+
+    state.folderLoadState = 'ready';
+    renderStatusChips();
     renderFolderStatus(state.folders);
     renderFolderList(state.folders);
+    return true;
   } catch (err) {
     folderStatusEl.innerHTML = `
       <div class="status-item error">
@@ -484,8 +618,10 @@ const loadFolders = async () => {
         </div>
       </div>
     `;
-    statusChips.innerHTML = '<span class="chip error">エラー</span>';
+    state.folderLoadState = 'error';
+    renderStatusChips();
     console.error(err);
+    return false;
   } finally {
     refreshBtn.disabled = false;
   }
