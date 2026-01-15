@@ -830,6 +830,7 @@ select:disabled {
   border-radius: var(--radius);
   padding: 12px;
   transition: border-color 0.15s;
+  cursor: pointer;
 }
 
 .result-card:hover {
