@@ -100,6 +100,11 @@ from .utils import (
     log_warn,
     process_role,
 )
+from .warmup import (
+    cleanup_old_warmup_locks,
+    keep_warm_loop as warmup_keep_warm_loop,
+    trigger_warmup as warmup_trigger_warmup,
+)
 
 
 def perform_search(
@@ -513,12 +518,13 @@ async def lifespan(app: FastAPI):
     announce_task = asyncio.create_task(announce_access_urls())
     global last_search_ts
     last_search_ts = time.time()
+    state.last_search_ts = last_search_ts
     warmup_task = None
     keepwarm_task = None
-    if env_bool("WARMUP_ENABLE", False) and is_primary_process():
+    # Warmup after build_all_indexes (WARMUP_ENABLED defaults to True)
+    if env_bool("WARMUP_ENABLED", True) and is_primary_process():
         warmup_task = asyncio.create_task(warmup_startup_tasks())
-        if env_bool("KEEPWARM_ENABLE", False):
-            keepwarm_task = asyncio.create_task(keep_warm_loop())
+        keepwarm_task = asyncio.create_task(warmup_keep_warm_loop(state))
     rebuild_fixed_cache()
     schedule_task = asyncio.create_task(schedule_index_rebuild())
     try:
@@ -1435,6 +1441,7 @@ def get_active_client_count() -> int:
 def mark_search_activity() -> None:
     global last_search_ts
     last_search_ts = time.time()
+    state.last_search_ts = last_search_ts
 
 
 def _warmup_params(prefix: str, defaults: Dict[str, int]) -> Tuple[int, int, int]:
@@ -1581,13 +1588,11 @@ async def trigger_warmup(reason: str, head_mb: int, stride_mb: int, max_mb: int)
 
 
 async def warmup_startup_tasks() -> None:
-    default_head = env_int("WARMUP_HEAD_MB", 2)
-    default_stride = env_int("WARMUP_STRIDE_MB", 4)
-    default_max = env_int("WARMUP_MAX_MB", 0)
-    head_mb, stride_mb, max_mb = _warmup_params(
-        "WARMUP", {"head": default_head, "stride": default_stride, "max": default_max}
-    )
-    await trigger_warmup("startup", head_mb, stride_mb, max_mb)
+    """Startup warmup tasks: warmup current generation and replay top queries."""
+    gen_name = get_current_generation_pointer()
+    if gen_name:
+        await warmup_trigger_warmup("startup", gen_name)
+        state.last_warmup_ts = time.time()
     replay_top_queries("startup")
 
 
@@ -1700,15 +1705,15 @@ async def schedule_index_rebuild():
                     log_info("スケジュール再構築: process を再初期化")
             rebuild_fixed_cache()
             sync_state()
-        if env_bool("WARMUP_ENABLE", False):
-            default_head = env_int("WARMUP_HEAD_MB", 2)
-            default_stride = env_int("WARMUP_STRIDE_MB", 4)
-            default_max = env_int("WARMUP_MAX_MB", 0)
-            head_mb, stride_mb, max_mb = _warmup_params(
-                "WARMUP", {"head": default_head, "stride": default_stride, "max": default_max}
-            )
-            await trigger_warmup("generation_switch", head_mb, stride_mb, max_mb)
+        # Warmup after generation switch (WARMUP_ENABLED defaults to True)
+        if env_bool("WARMUP_ENABLED", True):
+            gen_name = get_current_generation_pointer()
+            if gen_name:
+                await warmup_trigger_warmup("generation_switch", gen_name)
+                state.last_warmup_ts = time.time()
             replay_top_queries("generation_switch")
+        # Cleanup old warmup lock files
+        cleanup_old_warmup_locks()
         log_info("スケジュール再構築完了")
 
 

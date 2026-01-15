@@ -4,6 +4,13 @@ System Version: 1.2.0
 
 ## 1.2.0
 
+- 2026-01-16: 改善: warmupモジュールをリファクタリングし、世代ロック方式を導入。
+  - `backend/warmup.py` を新規作成し、warmup関連ロジックを分離
+  - 世代ごとに1回だけwarmupを実行する原子的ロック機構（`.warmup_<gen>.lock`）を実装
+  - `WARMUP_ENABLED` をデフォルトON（`True`）に変更
+  - keep-warmループにアクティブクライアント数チェックを追加（処理中リクエスト時はスキップ）
+  - warmup実行タイミングを明確化：起動後（現行世代確定後）と世代切替直後
+  - 環境変数: `WARMUP_ENABLED`, `WARMUP_IDLE_SEC`, `WARMUP_INTERVAL_SEC`, `WARMUP_MAX_FILES`
 - 2026-01-16: 改善: インデックス世代のウォームアップ/keep-warm/クエリ再生を追加し、メイン/管理プロセスのみで実行。
 - 2026-01-15: **リファクタリング**: web_server.py (4147行) を廃止し、モジュール分割された backend/ 構成へ移行。
   - `app.py`: エントリポイント
