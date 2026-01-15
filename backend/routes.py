@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import mmap
+import multiprocessing
 import os
 import pickle
 import re
@@ -433,7 +434,7 @@ class HeartbeatRequest(BaseModel):
 async def lifespan(app: FastAPI):
     init_folder_states()
     install_asyncio_exception_filter()
-    global search_semaphore, rw_lock, search_worker_count, search_executor, search_execution_mode, search_concurrency, fixed_cache_index, memory_cache, query_stats, query_stats_dirty, query_stats_last_saved, folder_order
+    global search_semaphore, rw_lock, search_worker_count, search_executor, search_execution_mode, search_concurrency, fixed_cache_index, memory_cache, query_stats, query_stats_dirty, query_stats_last_saved, folder_order, warmup_task, keepwarm_task, last_search_ts
     rw_lock = AsyncRWLock()
     memory_cache = MemoryCache(
         DEFAULT_CACHE_MAX_ENTRIES,
@@ -510,13 +511,23 @@ async def lifespan(app: FastAPI):
 
     announce_task = asyncio.create_task(announce_access_urls())
     rebuild_fixed_cache()
+    last_search_ts = time.time()
+    warmup_task = asyncio.create_task(run_quick_warmup("startup"))
+    keepwarm_task = asyncio.create_task(keepwarm_loop())
     schedule_task = asyncio.create_task(schedule_index_rebuild())
     try:
         yield
     finally:
-        for task in (announce_task, schedule_task):
+        for task in (announce_task, schedule_task, warmup_task, keepwarm_task):
+            if task is None:
+                continue
             task.cancel()
-        await asyncio.gather(announce_task, schedule_task, return_exceptions=True)
+        await asyncio.gather(
+            announce_task,
+            schedule_task,
+            *(t for t in (warmup_task, keepwarm_task) if t is not None),
+            return_exceptions=True,
+        )
         if search_executor:
             search_executor.shutdown(wait=True)
 
@@ -564,6 +575,11 @@ search_concurrency = 1
 search_executor = None
 search_execution_mode = "thread"
 normalize_mode_warning_emitted = False
+last_search_ts = 0.0
+last_quick_warmup_gen: str | None = None
+warmup_task: asyncio.Task | None = None
+keepwarm_task: asyncio.Task | None = None
+warmup_lock = threading.Lock()
 file_id_map: Dict[str, Dict[str, str]] = {}
 file_id_lock = threading.RLock()
 active_client_lock = threading.Lock()
@@ -628,6 +644,214 @@ def sync_state() -> None:
     state.search_execution_mode = search_execution_mode
     state.normalize_mode_warning_emitted = normalize_mode_warning_emitted
     state.active_client_heartbeats = active_client_heartbeats
+
+
+def get_process_role() -> str:
+    if os.getenv("UVICORN_WORKER") or os.getenv("GUNICORN_WORKER"):
+        return "worker"
+    try:
+        parent = multiprocessing.parent_process()
+    except Exception:
+        parent = None
+    if parent is None:
+        if os.getenv("GUNICORN_CMD_ARGS") or os.getenv("SERVER_SOFTWARE", "").lower().startswith("gunicorn"):
+            return "manager"
+        return "main"
+    return "worker"
+
+
+def should_run_warmup() -> bool:
+    if not env_bool("WARMUP_ENABLE", False):
+        return False
+    return get_process_role() != "worker"
+
+
+def _iter_generation_files(gen_dir: Path) -> List[Path]:
+    if not gen_dir.exists():
+        return []
+    return [path for path in gen_dir.rglob("*") if path.is_file()]
+
+
+def _warmup_touch_file(
+    path: Path,
+    head_bytes: int,
+    stride_bytes: int,
+    stride_read_bytes: int,
+    remaining_bytes: int | None,
+) -> int:
+    bytes_read = 0
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    if size <= 0:
+        return 0
+    try:
+        with open(path, "rb") as fh:
+            if head_bytes > 0:
+                to_read = min(size, head_bytes)
+                if remaining_bytes is not None:
+                    to_read = min(to_read, remaining_bytes)
+                if to_read > 0:
+                    bytes_read += len(fh.read(to_read))
+            if stride_bytes > 0 and size > head_bytes:
+                offset = max(head_bytes, 0)
+                while offset < size:
+                    if remaining_bytes is not None and bytes_read >= remaining_bytes:
+                        break
+                    try:
+                        fh.seek(offset)
+                    except OSError:
+                        break
+                    read_size = stride_read_bytes
+                    if remaining_bytes is not None:
+                        read_size = min(read_size, remaining_bytes - bytes_read)
+                    if read_size <= 0:
+                        break
+                    chunk = fh.read(read_size)
+                    if not chunk:
+                        break
+                    bytes_read += len(chunk)
+                    offset += stride_bytes
+    except OSError:
+        return bytes_read
+    return bytes_read
+
+
+def warmup_generation_files(reason: str, keepwarm: bool = False) -> None:
+    if keepwarm:
+        if get_process_role() == "worker":
+            return
+    else:
+        if not should_run_warmup():
+            return
+    role = get_process_role()
+    head_mb = env_int("WARMUP_HEAD_MB", 2)
+    stride_mb = env_int("WARMUP_STRIDE_MB", 4)
+    max_mb = env_int("WARMUP_MAX_MB", 512)
+    head_bytes = max(0, head_mb) * 1024 * 1024
+    stride_bytes = max(0, stride_mb) * 1024 * 1024
+    stride_read_bytes = 4096
+    max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else None
+
+    gen_dir = get_current_generation_dir()
+    gen_name = get_current_generation_pointer() or "unknown"
+    files = _iter_generation_files(gen_dir)
+    if not files:
+        log_notice(f"ウォームアップ対象なし: reason={reason} role={role} gen={gen_name}")
+        return
+    with warmup_lock:
+        start = time.perf_counter()
+        read_bytes = 0
+        target_total = max_bytes if max_bytes is not None else float("inf")
+        for path in files:
+            if read_bytes >= target_total:
+                break
+            remaining = None if max_bytes is None else max(0, max_bytes - read_bytes)
+            read_bytes += _warmup_touch_file(
+                path,
+                head_bytes,
+                stride_bytes,
+                stride_read_bytes,
+                remaining,
+            )
+        elapsed = time.perf_counter() - start
+    read_mb = read_bytes / 1024 / 1024
+    log_info(
+        f"ウォームアップ完了: reason={reason} role={role} gen={gen_name} "
+        f"files={len(files)} read={read_mb:.1f}MB time={elapsed:.2f}s"
+    )
+
+
+def select_replay_queries(top_k: int) -> List[Dict]:
+    entries = [
+        entry
+        for entry in query_stats.values()
+        if entry.get("query") and entry.get("folders")
+    ]
+    entries.sort(
+        key=lambda e: (
+            e.get("count_total", 0),
+            e.get("total_time_ms", 0.0),
+            e.get("last_access", 0),
+        ),
+        reverse=True,
+    )
+    return entries[: max(0, top_k)]
+
+
+async def replay_top_queries(reason: str) -> None:
+    if not env_bool("QUERY_REPLAY_ENABLE", False):
+        return
+    if not should_run_warmup():
+        return
+    top_k = env_int("QUERY_REPLAY_TOP_K", 10)
+    entries = select_replay_queries(top_k)
+    if not entries:
+        log_notice(f"クエリ再生スキップ: reason={reason} (対象なし)")
+        return
+    loop = asyncio.get_running_loop()
+    log_info(f"クエリ再生開始: reason={reason} 件数={len(entries)}")
+    async with rw_lock.read_lock():
+        for entry in entries:
+            params = SearchParams(
+                entry.get("mode", "OR"),
+                entry.get("range", 0),
+                entry.get("space", "jp"),
+                entry.get("normalize", "exact"),
+            )
+            target_ids = [
+                fid for fid in entry.get("folders", [])
+                if fid in folder_states and folder_states[fid].get("ready")
+            ]
+            if not target_ids:
+                continue
+            query = entry.get("query", "")
+            await loop.run_in_executor(
+                None,
+                run_search_direct,
+                query,
+                params,
+                target_ids,
+                False,
+            )
+    log_info(f"クエリ再生完了: reason={reason}")
+
+
+async def run_quick_warmup(reason: str) -> None:
+    if not env_bool("WARMUP_ENABLE", False):
+        return
+    role = get_process_role()
+    if role == "worker":
+        log_notice(f"ウォームアップ無効: reason={reason} role={role}")
+        return
+    gen_name = get_current_generation_pointer() or "unknown"
+    global last_quick_warmup_gen
+    if last_quick_warmup_gen == gen_name:
+        log_notice(f"ウォームアップスキップ: reason={reason} gen={gen_name} (既実行)")
+        return
+    loop = asyncio.get_running_loop()
+    log_info(f"ウォームアップ開始: reason={reason} gen={gen_name} role={role}")
+    await loop.run_in_executor(None, warmup_generation_files, reason, False)
+    await replay_top_queries(reason)
+    last_quick_warmup_gen = gen_name
+
+
+async def keepwarm_loop() -> None:
+    interval_min = max(1, env_int("KEEPWARM_INTERVAL_MINUTES", 10))
+    idle_min = max(1, env_int("KEEPWARM_IDLE_MINUTES", 10))
+    loop = asyncio.get_running_loop()
+    while True:
+        await asyncio.sleep(interval_min * 60)
+        if not env_bool("KEEPWARM_ENABLE", False):
+            continue
+        if get_process_role() == "worker":
+            continue
+        idle_sec = time.time() - last_search_ts
+        if idle_sec < idle_min * 60:
+            continue
+        log_info(f"keep-warm 開始: idle={idle_sec:.0f}s")
+        await loop.run_in_executor(None, warmup_generation_files, "keep-warm", True)
 
 
 def create_app() -> FastAPI:
@@ -1503,6 +1727,7 @@ async def schedule_index_rebuild():
             rebuild_fixed_cache()
             sync_state()
         log_info("スケジュール再構築完了")
+        await run_quick_warmup("rebuild")
 
 
 def rebuild_fixed_cache():
@@ -1804,9 +2029,10 @@ def _try_get_fixed_cache(
 
 @app.post("/api/search")
 async def search(req: SearchRequest):
-    global rw_lock, search_semaphore, search_executor, search_execution_mode
+    global rw_lock, search_semaphore, search_executor, search_execution_mode, last_search_ts
     if rw_lock is None or search_semaphore is None:
         raise HTTPException(status_code=503, detail="検索システムの初期化中です")
+    last_search_ts = time.time()
 
     # Normal search (full index scan)
     async with search_semaphore:
@@ -1915,9 +2141,10 @@ async def search(req: SearchRequest):
 @app.post("/api/export")
 async def export_results(req: SearchRequest, format: str = "csv"):
     """検索結果をCSV/JSON形式でエクスポートする"""
-    global rw_lock, search_semaphore, search_executor, search_execution_mode
+    global rw_lock, search_semaphore, search_executor, search_execution_mode, last_search_ts
     if rw_lock is None or search_semaphore is None:
         raise HTTPException(status_code=503, detail="検索システムの初期化中です")
+    last_search_ts = time.time()
 
     # Validate format
     if format not in ["csv", "json"]:
