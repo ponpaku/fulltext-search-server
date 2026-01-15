@@ -93,10 +93,12 @@ from .utils import (
     file_id_from_path,
     folder_id_from_path,
     get_ipv4_addresses,
+    is_primary_process,
     log_info,
     log_notice,
     log_success,
     log_warn,
+    process_role,
 )
 
 
@@ -509,14 +511,27 @@ async def lifespan(app: FastAPI):
             log_info(f"アクセスURL: {colorize_url(url)}")
 
     announce_task = asyncio.create_task(announce_access_urls())
+    global last_search_ts
+    last_search_ts = time.time()
+    warmup_task = None
+    keepwarm_task = None
+    if env_bool("WARMUP_ENABLE", False) and is_primary_process():
+        warmup_task = asyncio.create_task(warmup_startup_tasks())
+        if env_bool("KEEPWARM_ENABLE", False):
+            keepwarm_task = asyncio.create_task(keep_warm_loop())
     rebuild_fixed_cache()
     schedule_task = asyncio.create_task(schedule_index_rebuild())
     try:
         yield
     finally:
-        for task in (announce_task, schedule_task):
+        for task in (announce_task, schedule_task, warmup_task, keepwarm_task):
+            if task is None:
+                continue
             task.cancel()
-        await asyncio.gather(announce_task, schedule_task, return_exceptions=True)
+        await asyncio.gather(
+            *(task for task in (announce_task, schedule_task, warmup_task, keepwarm_task) if task),
+            return_exceptions=True,
+        )
         if search_executor:
             search_executor.shutdown(wait=True)
 
@@ -568,6 +583,9 @@ file_id_map: Dict[str, Dict[str, str]] = {}
 file_id_lock = threading.RLock()
 active_client_lock = threading.Lock()
 active_client_heartbeats: Dict[str, float] = {}
+last_search_ts = 0.0
+warmup_lock = threading.Lock()
+warmup_last_ts = 0.0
 
 state = AppState(
     configured_folders=configured_folders,
@@ -1414,6 +1432,186 @@ def get_active_client_count() -> int:
         return min(len(active_client_heartbeats), max_clients)
 
 
+def mark_search_activity() -> None:
+    global last_search_ts
+    last_search_ts = time.time()
+
+
+def _warmup_params(prefix: str, defaults: Dict[str, int]) -> Tuple[int, int, int]:
+    head_mb = env_int(f"{prefix}_HEAD_MB", defaults["head"])
+    stride_mb = env_int(f"{prefix}_STRIDE_MB", defaults["stride"])
+    max_mb = env_int(f"{prefix}_MAX_MB", defaults["max"])
+    return max(0, head_mb), max(0, stride_mb), max(0, max_mb)
+
+
+def _read_touch_file(
+    path: Path,
+    head_bytes: int,
+    stride_bytes: int,
+    page_bytes: int,
+    max_bytes: int | None,
+) -> int:
+    bytes_read = 0
+    try:
+        size = path.stat().st_size
+    except Exception:
+        return 0
+    if size <= 0:
+        return 0
+    try:
+        with path.open("rb") as f:
+            if head_bytes > 0:
+                head = f.read(min(head_bytes, size))
+                bytes_read += len(head)
+            if stride_bytes > 0 and size > head_bytes:
+                offset = head_bytes
+                while offset < size:
+                    if max_bytes is not None and bytes_read >= max_bytes:
+                        break
+                    f.seek(offset)
+                    chunk = f.read(page_bytes)
+                    bytes_read += len(chunk)
+                    offset += stride_bytes
+    except Exception:
+        return bytes_read
+    return bytes_read
+
+
+def run_warmup(reason: str, head_mb: int, stride_mb: int, max_mb: int) -> None:
+    global warmup_last_ts
+    role = process_role()
+    enable = env_bool("KEEPWARM_ENABLE", False) if reason == "keep-warm" else env_bool("WARMUP_ENABLE", False)
+    if not enable:
+        return
+    if not is_primary_process():
+        log_notice(f"ウォームアップスキップ: role={role} reason={reason}")
+        return
+    if not warmup_lock.acquire(blocking=False):
+        log_notice(f"ウォームアップスキップ: 既に実行中 reason={reason}")
+        return
+    try:
+        gen_dir = get_current_generation_dir()
+        gen_name = get_current_generation_pointer() or "unknown"
+        if not gen_dir.exists():
+            log_warn(f"ウォームアップ失敗: gen_{gen_name} が見つかりません")
+            return
+        files = sorted([p for p in gen_dir.iterdir() if p.is_file()])
+        if not files:
+            log_notice(f"ウォームアップ対象なし: gen_{gen_name}")
+            return
+        max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else None
+        head_bytes = head_mb * 1024 * 1024
+        stride_bytes = stride_mb * 1024 * 1024
+        page_bytes = 4096
+        log_info(
+            "ウォームアップ開始: "
+            f"reason={reason} role={role} gen={gen_name} files={len(files)} "
+            f"head={head_mb}MB stride={stride_mb}MB max={max_mb}MB"
+        )
+        start = time.time()
+        total_bytes = 0
+        touched_files = 0
+        for path in files:
+            if max_bytes is not None and total_bytes >= max_bytes:
+                break
+            bytes_read = _read_touch_file(
+                path,
+                head_bytes,
+                stride_bytes,
+                page_bytes,
+                max_bytes - total_bytes if max_bytes is not None else None,
+            )
+            if bytes_read:
+                touched_files += 1
+                total_bytes += bytes_read
+        elapsed = time.time() - start
+        warmup_last_ts = time.time()
+        log_info(
+            "ウォームアップ完了: "
+            f"reason={reason} role={role} gen={gen_name} "
+            f"files={touched_files}/{len(files)} bytes={total_bytes} "
+            f"elapsed={elapsed:.2f}s"
+        )
+    finally:
+        warmup_lock.release()
+
+
+def replay_top_queries(reason: str) -> None:
+    if not env_bool("QUERY_REPLAY_ENABLE", False):
+        return
+    if not is_primary_process():
+        return
+    top_k = env_int("QUERY_REPLAY_TOP_K", 10)
+    if top_k <= 0:
+        return
+    prune_query_stats(query_stats)
+    candidates = [v for v in query_stats.values() if v.get("query")]
+    candidates.sort(key=lambda v: v.get("count_total", 0), reverse=True)
+    if not candidates:
+        log_notice(f"クエリ再生スキップ: 対象なし reason={reason}")
+        return
+    role = process_role()
+    log_info(f"クエリ再生開始: reason={reason} role={role} top_k={top_k}")
+    replayed = 0
+    for entry in candidates[:top_k]:
+        target_ids = [
+            fid
+            for fid in entry.get("folders", [])
+            if fid in folder_states and folder_states[fid].get("ready")
+        ]
+        if not target_ids:
+            continue
+        params = SearchParams(
+            entry.get("mode", "AND"),
+            int(entry.get("range", 0)),
+            entry.get("space", "jp"),
+            resolve_normalize_mode(entry.get("normalize")),
+        )
+        try:
+            run_search_direct(entry.get("query", ""), params, target_ids, False)
+            replayed += 1
+        except Exception:
+            continue
+    log_info(f"クエリ再生完了: reason={reason} role={role} replayed={replayed}")
+
+
+async def trigger_warmup(reason: str, head_mb: int, stride_mb: int, max_mb: int) -> None:
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, run_warmup, reason, head_mb, stride_mb, max_mb)
+
+
+async def warmup_startup_tasks() -> None:
+    default_head = env_int("WARMUP_HEAD_MB", 2)
+    default_stride = env_int("WARMUP_STRIDE_MB", 4)
+    default_max = env_int("WARMUP_MAX_MB", 0)
+    head_mb, stride_mb, max_mb = _warmup_params(
+        "WARMUP", {"head": default_head, "stride": default_stride, "max": default_max}
+    )
+    await trigger_warmup("startup", head_mb, stride_mb, max_mb)
+    replay_top_queries("startup")
+
+
+async def keep_warm_loop() -> None:
+    if not env_bool("KEEPWARM_ENABLE", False):
+        return
+    if not is_primary_process():
+        return
+    idle_minutes = env_int("KEEPWARM_IDLE_MINUTES", 10)
+    interval_minutes = env_int("KEEPWARM_INTERVAL_MINUTES", 10)
+    default_head = env_int("WARMUP_HEAD_MB", 2)
+    default_stride = env_int("WARMUP_STRIDE_MB", 4)
+    default_max = env_int("KEEPWARM_MAX_MB", 256)
+    head_mb, stride_mb, max_mb = _warmup_params(
+        "KEEPWARM", {"head": default_head, "stride": default_stride, "max": default_max}
+    )
+    while True:
+        await asyncio.sleep(max(1, interval_minutes) * 60)
+        idle_sec = max(1, idle_minutes) * 60
+        if time.time() - last_search_ts < idle_sec:
+            continue
+        await trigger_warmup("keep-warm", head_mb, stride_mb, max_mb)
+
+
 def init_search_settings() -> Tuple[int, int, int]:
     budget = total_worker_budget()
     env_conc = os.getenv("SEARCH_CONCURRENCY", "").strip()
@@ -1502,6 +1700,15 @@ async def schedule_index_rebuild():
                     log_info("スケジュール再構築: process を再初期化")
             rebuild_fixed_cache()
             sync_state()
+        if env_bool("WARMUP_ENABLE", False):
+            default_head = env_int("WARMUP_HEAD_MB", 2)
+            default_stride = env_int("WARMUP_STRIDE_MB", 4)
+            default_max = env_int("WARMUP_MAX_MB", 0)
+            head_mb, stride_mb, max_mb = _warmup_params(
+                "WARMUP", {"head": default_head, "stride": default_stride, "max": default_max}
+            )
+            await trigger_warmup("generation_switch", head_mb, stride_mb, max_mb)
+            replay_top_queries("generation_switch")
         log_info("スケジュール再構築完了")
 
 
@@ -1820,6 +2027,7 @@ async def search(req: SearchRequest):
             normalize_mode = resolve_normalize_mode(req.normalize_mode)
             params = SearchParams(req.mode, req.range_limit, req.space_mode, normalize_mode)
             cache_key = cache_key_for(req.query, params, target_ids)
+            mark_search_activity()
 
             # キャッシュからの取得を試行
             cached_result = _try_get_memory_cache(cache_key, target_ids, req.query, params)
@@ -1933,6 +2141,7 @@ async def export_results(req: SearchRequest, format: str = "csv"):
 
             normalize_mode = resolve_normalize_mode(req.normalize_mode)
             params = SearchParams(req.mode, req.range_limit, req.space_mode, normalize_mode)
+            mark_search_activity()
             keywords, norm_keyword_groups = build_query_groups(
                 req.query,
                 req.space_mode,

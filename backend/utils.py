@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import os
 import re
 import socket
@@ -133,3 +134,17 @@ def folder_id_from_path(path: str) -> str:
 def file_id_from_path(path: str) -> str:
     # 12 hex chars = 48 bits, collision probability ~1e-7 at 10k files
     return hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
+
+
+def process_role() -> str:
+    proc = multiprocessing.current_process()
+    parent = multiprocessing.parent_process()
+    if parent is None and proc.name == "MainProcess":
+        return "main"
+    if parent is None:
+        return "manager"
+    return "worker"
+
+
+def is_primary_process() -> bool:
+    return process_role() in {"main", "manager"}
