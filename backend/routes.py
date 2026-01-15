@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import mmap
+import multiprocessing
 import os
 import pickle
 import re
@@ -433,7 +434,7 @@ class HeartbeatRequest(BaseModel):
 async def lifespan(app: FastAPI):
     init_folder_states()
     install_asyncio_exception_filter()
-    global search_semaphore, rw_lock, search_worker_count, search_executor, search_execution_mode, search_concurrency, fixed_cache_index, memory_cache, query_stats, query_stats_dirty, query_stats_last_saved, folder_order
+    global search_semaphore, rw_lock, search_worker_count, search_executor, search_execution_mode, search_concurrency, fixed_cache_index, memory_cache, query_stats, query_stats_dirty, query_stats_last_saved, folder_order, last_search_ts
     rw_lock = AsyncRWLock()
     memory_cache = MemoryCache(
         DEFAULT_CACHE_MAX_ENTRIES,
@@ -495,6 +496,7 @@ async def lifespan(app: FastAPI):
             f"検索実行モード: thread concurrency={concurrency} workers={workers} budget={budget}"
         )
     sync_state()
+    last_search_ts = time.time()
     cert_dir = os.getenv("CERT_DIR", "certs")
     cert_path = (BASE_DIR / cert_dir).resolve()
     scheme = "https" if (cert_path / "lan-cert.pem").exists() else "http"
@@ -510,13 +512,17 @@ async def lifespan(app: FastAPI):
 
     announce_task = asyncio.create_task(announce_access_urls())
     rebuild_fixed_cache()
+    warmup_task = asyncio.create_task(run_warmup_task("startup", True)) if warmup_enabled() else None
+    keepwarm_task = asyncio.create_task(schedule_keepwarm()) if keepwarm_enabled() else None
     schedule_task = asyncio.create_task(schedule_index_rebuild())
     try:
         yield
     finally:
-        for task in (announce_task, schedule_task):
+        for task in (announce_task, schedule_task, warmup_task, keepwarm_task):
+            if task is None:
+                continue
             task.cancel()
-        await asyncio.gather(announce_task, schedule_task, return_exceptions=True)
+        await asyncio.gather(announce_task, schedule_task, *(t for t in (warmup_task, keepwarm_task) if t is not None), return_exceptions=True)
         if search_executor:
             search_executor.shutdown(wait=True)
 
@@ -558,6 +564,9 @@ WORKER_SHARED_ENTRIES: Dict[str, List[Dict]] = {}
 WORKER_SHARED_MM: Dict[str, mmap.mmap] = {}
 WORKER_SHARED_FILES: Dict[str, object] = {}
 search_semaphore: asyncio.Semaphore | None = None
+last_search_ts = 0.0
+last_keepwarm_ts = 0.0
+warmup_lock = threading.Lock()
 rw_lock = None
 search_worker_count = 1
 search_concurrency = 1
@@ -1428,6 +1437,222 @@ def init_search_settings() -> Tuple[int, int, int]:
     return budget, concurrency, workers
 
 
+def get_process_role() -> str:
+    if os.getenv("UVICORN_WORKER_ID") or os.getenv("GUNICORN_WORKER_ID"):
+        return "worker"
+    if multiprocessing.current_process().name != "MainProcess":
+        return "worker"
+    return "main"
+
+
+def warmup_enabled() -> bool:
+    return env_bool("WARMUP_ENABLE", False)
+
+
+def keepwarm_enabled() -> bool:
+    return env_bool("KEEPWARM_ENABLE", False)
+
+
+def warmup_head_bytes() -> int:
+    head_mb = env_int("WARMUP_HEAD_MB", 2)
+    return max(0, head_mb) * 1024 * 1024
+
+
+def warmup_stride_bytes() -> int:
+    stride_mb = env_int("WARMUP_STRIDE_MB", 4)
+    return max(0, stride_mb) * 1024 * 1024
+
+
+def warmup_max_bytes() -> int:
+    max_mb = env_int("WARMUP_MAX_MB", 0)
+    return max(0, max_mb) * 1024 * 1024
+
+
+def warmup_lock_path(gen_name: str | None) -> Path:
+    safe_name = gen_name or "unknown"
+    return INDEX_DIR / f".warmup_{safe_name}.lock"
+
+
+def try_acquire_warmup_lock(gen_name: str | None) -> bool:
+    lock_path = warmup_lock_path(gen_name)
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except Exception as e:
+        log_warn(f"ウォームアップロック作成失敗: {lock_path} エラー={e}")
+        return False
+
+
+def warmup_generation_files(
+    files: List[Path],
+    head_bytes: int,
+    stride_bytes: int,
+    max_bytes: int,
+) -> int:
+    total_bytes = 0
+    for path in files:
+        if max_bytes > 0 and total_bytes >= max_bytes:
+            break
+        try:
+            size = path.stat().st_size
+            if size <= 0:
+                continue
+            with path.open("rb") as f:
+                remaining_head = min(size, head_bytes)
+                while remaining_head > 0:
+                    if max_bytes > 0 and total_bytes >= max_bytes:
+                        break
+                    chunk = min(1024 * 1024, remaining_head)
+                    if max_bytes > 0:
+                        chunk = min(chunk, max_bytes - total_bytes)
+                    data = f.read(chunk)
+                    if not data:
+                        break
+                    read_len = len(data)
+                    total_bytes += read_len
+                    remaining_head -= read_len
+                if stride_bytes > 0 and (max_bytes == 0 or total_bytes < max_bytes):
+                    offset = max(head_bytes, 0)
+                    while offset < size:
+                        if max_bytes > 0 and total_bytes >= max_bytes:
+                            break
+                        f.seek(offset)
+                        data = f.read(4096)
+                        if not data:
+                            break
+                        total_bytes += len(data)
+                        offset += stride_bytes
+        except Exception as e:
+            log_warn(f"ウォームアップ読み込み失敗: {path} エラー={e}")
+    return total_bytes
+
+
+def run_query_replay(top_k: int) -> int:
+    if top_k <= 0:
+        return 0
+    entries = [entry for entry in query_stats.values() if entry.get("query")]
+    if not entries:
+        return 0
+    entries.sort(
+        key=lambda e: (e.get("count_total", 0), e.get("last_access", 0)),
+        reverse=True,
+    )
+    executed = 0
+    for entry in entries[:top_k]:
+        target_ids = [
+            fid
+            for fid in entry.get("folders", [])
+            if fid in folder_states and folder_states[fid].get("ready")
+        ]
+        if not target_ids:
+            continue
+        normalize_mode = resolve_normalize_mode(entry.get("normalize"))
+        params = SearchParams(entry.get("mode", "AND"), entry.get("range", 0), entry.get("space", "jp"), normalize_mode)
+        try:
+            run_search_direct(entry["query"], params, target_ids)
+            executed += 1
+        except Exception as e:
+            log_warn(f"クエリ再生ウォームアップ失敗: query={entry.get('query')} エラー={e}")
+    return executed
+
+
+def warmup_current_generation(reason: str, once_per_generation: bool = False, max_bytes_override: int | None = None) -> None:
+    if reason == "keepwarm":
+        if not keepwarm_enabled():
+            return
+    elif not warmup_enabled():
+        return
+    role = get_process_role()
+    if role != "main":
+        log_info(f"ウォームアップスキップ: reason={reason} role={role}")
+        return
+    gen_name = get_current_generation_pointer()
+    gen_dir = get_current_generation_dir()
+    if not gen_dir.exists():
+        log_warn("ウォームアップスキップ: 現行世代ディレクトリが見つかりません")
+        return
+    if once_per_generation and not try_acquire_warmup_lock(gen_name):
+        log_info(f"ウォームアップスキップ: 既に実行済み gen={gen_name}")
+        return
+    if not warmup_lock.acquire(blocking=False):
+        log_info("ウォームアップスキップ: 実行中")
+        return
+    try:
+        files = sorted([p for p in gen_dir.rglob("*") if p.is_file()])
+        file_count = len(files)
+        head_bytes = warmup_head_bytes()
+        stride_bytes = warmup_stride_bytes()
+        max_bytes = warmup_max_bytes()
+        if max_bytes_override is not None:
+            max_bytes = max_bytes_override
+        start = time.time()
+        log_info(
+            f"ウォームアップ開始: reason={reason} gen={gen_name} files={file_count} "
+            f"role={role} pid={os.getpid()}"
+        )
+        total_bytes = warmup_generation_files(files, head_bytes, stride_bytes, max_bytes)
+        elapsed = time.time() - start
+        total_mb = total_bytes / (1024 * 1024)
+        log_info(
+            f"ウォームアップ完了: reason={reason} gen={gen_name} files={file_count} "
+            f"bytes={total_mb:.2f}MB 時間={elapsed:.2f}s role={role} pid={os.getpid()}"
+        )
+        if reason in {"startup", "rebuild"} and env_bool("QUERY_REPLAY_ENABLE", False):
+            top_k = env_int("QUERY_REPLAY_TOP_K", 10)
+            replay_start = time.time()
+            replayed = run_query_replay(top_k)
+            replay_elapsed = time.time() - replay_start
+            log_info(
+                f"クエリ再生ウォームアップ完了: reason={reason} replayed={replayed}/{top_k} "
+                f"時間={replay_elapsed:.2f}s"
+            )
+    finally:
+        warmup_lock.release()
+
+
+async def schedule_keepwarm():
+    global last_keepwarm_ts, last_search_ts
+    if not keepwarm_enabled():
+        return
+    idle_minutes = env_int("KEEPWARM_IDLE_MINUTES", 10)
+    interval_minutes = env_int("KEEPWARM_INTERVAL_MINUTES", 10)
+    if idle_minutes <= 0 or interval_minutes <= 0:
+        return
+    max_mb = env_int("KEEPWARM_MAX_MB", 0)
+    max_bytes = max(0, max_mb) * 1024 * 1024 if max_mb else warmup_max_bytes()
+    poll_sec = min(60, interval_minutes * 60)
+    while True:
+        await asyncio.sleep(poll_sec)
+        if get_process_role() != "main":
+            continue
+        now = time.time()
+        if last_search_ts and now - last_search_ts < idle_minutes * 60:
+            continue
+        if last_keepwarm_ts and now - last_keepwarm_ts < interval_minutes * 60:
+            continue
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            warmup_current_generation,
+            "keepwarm",
+            False,
+            max_bytes,
+        )
+        last_keepwarm_ts = time.time()
+
+
+async def run_warmup_task(reason: str, once_per_generation: bool, max_bytes: int | None = None) -> None:
+    await asyncio.get_running_loop().run_in_executor(
+        None,
+        warmup_current_generation,
+        reason,
+        once_per_generation,
+        max_bytes,
+    )
+
+
 def parse_rebuild_schedule(value: str) -> Tuple[str, int, int]:
     raw = (value or "").strip()
     if not raw:
@@ -1502,6 +1727,8 @@ async def schedule_index_rebuild():
                     log_info("スケジュール再構築: process を再初期化")
             rebuild_fixed_cache()
             sync_state()
+        if warmup_enabled():
+            await run_warmup_task("rebuild", True)
         log_info("スケジュール再構築完了")
 
 
@@ -1804,7 +2031,7 @@ def _try_get_fixed_cache(
 
 @app.post("/api/search")
 async def search(req: SearchRequest):
-    global rw_lock, search_semaphore, search_executor, search_execution_mode
+    global rw_lock, search_semaphore, search_executor, search_execution_mode, last_search_ts
     if rw_lock is None or search_semaphore is None:
         raise HTTPException(status_code=503, detail="検索システムの初期化中です")
 
@@ -1812,6 +2039,7 @@ async def search(req: SearchRequest):
     async with search_semaphore:
         async with rw_lock.read_lock():
             start_time = time.time()
+            last_search_ts = start_time
             available_ids = set(folder_states.keys())
             target_ids = [f for f in req.folders if f in available_ids and folder_states[f].get("ready")]
             if not target_ids:
@@ -1915,7 +2143,7 @@ async def search(req: SearchRequest):
 @app.post("/api/export")
 async def export_results(req: SearchRequest, format: str = "csv"):
     """検索結果をCSV/JSON形式でエクスポートする"""
-    global rw_lock, search_semaphore, search_executor, search_execution_mode
+    global rw_lock, search_semaphore, search_executor, search_execution_mode, last_search_ts
     if rw_lock is None or search_semaphore is None:
         raise HTTPException(status_code=503, detail="検索システムの初期化中です")
 
@@ -1926,6 +2154,7 @@ async def export_results(req: SearchRequest, format: str = "csv"):
     # Execute search first
     async with search_semaphore:
         async with rw_lock.read_lock():
+            last_search_ts = time.time()
             available_ids = set(folder_states.keys())
             target_ids = [f for f in req.folders if f in available_ids and folder_states[f].get("ready")]
             if not target_ids:
