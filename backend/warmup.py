@@ -21,26 +21,6 @@ _last_warmup_ts: float = 0.0
 _last_warmup_mono: float = 0.0  # monotonic time for interval checks
 
 
-def _is_warmup_enabled() -> bool:
-    """Check if warmup is enabled (with legacy env fallback).
-
-    Checks WARMUP_ENABLED first, then falls back to legacy WARMUP_ENABLE.
-    Default is True (enabled).
-    """
-    # Check new env variable first
-    new_val = os.getenv("WARMUP_ENABLED", "").strip().lower()
-    if new_val:
-        return new_val in {"1", "true", "yes"}
-
-    # Fallback to legacy env variable
-    legacy_val = os.getenv("WARMUP_ENABLE", "").strip().lower()
-    if legacy_val:
-        return legacy_val in {"1", "true", "yes"}
-
-    # Default is True
-    return True
-
-
 def _warmup_lock_path(gen_name: str) -> Path:
     """Get the lock file path for a generation."""
     return INDEX_DIR / f".warmup_{gen_name}.lock"
@@ -136,8 +116,8 @@ def run_warmup_once(reason: str, gen_name: str | None = None) -> bool:
         log_warn(f"warmupスキップ: 世代が見つかりません reason={reason}")
         return False
 
-    # Check if warmup is enabled (with legacy env fallback)
-    if not _is_warmup_enabled():
+    # Check if warmup is enabled
+    if not env_bool("WARMUP_ENABLED", True):
         log_notice(f"warmupスキップ: disabled reason={reason} gen={gen_name}")
         return False
 
@@ -280,8 +260,7 @@ async def keep_warm_loop(state: AppState) -> None:
     Args:
         state: Application state containing last_search_ts, active_client_heartbeats, etc.
     """
-    # Check with legacy env fallback
-    if not _is_warmup_enabled():
+    if not env_bool("WARMUP_ENABLED", True):
         return
     if not is_primary_process():
         return

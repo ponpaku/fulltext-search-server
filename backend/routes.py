@@ -101,7 +101,6 @@ from .utils import (
     process_role,
 )
 from .warmup import (
-    _is_warmup_enabled as is_warmup_enabled,
     cleanup_old_warmup_locks,
     keep_warm_loop as warmup_keep_warm_loop,
     trigger_warmup as warmup_trigger_warmup,
@@ -523,7 +522,7 @@ async def lifespan(app: FastAPI):
     warmup_task = None
     keepwarm_task = None
     # Warmup after build_all_indexes (with legacy env fallback)
-    if is_warmup_enabled() and is_primary_process():
+    if env_bool("WARMUP_ENABLED", True) and is_primary_process():
         warmup_task = asyncio.create_task(warmup_startup_tasks())
         keepwarm_task = asyncio.create_task(warmup_keep_warm_loop(state))
     rebuild_fixed_cache()
@@ -1580,7 +1579,7 @@ async def schedule_index_rebuild():
             rebuild_fixed_cache()
             sync_state()
         # Warmup after generation switch (with legacy env fallback)
-        if is_warmup_enabled():
+        if env_bool("WARMUP_ENABLED", True):
             gen_name = get_current_generation_pointer()
             if gen_name:
                 await warmup_trigger_warmup("generation_switch", gen_name)
