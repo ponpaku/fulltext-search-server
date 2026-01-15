@@ -118,8 +118,8 @@ const HEARTBEAT_IDLE_THRESHOLD_MS = 90000;
 const HEARTBEAT_FAIL_THRESHOLD = 2;
 const HEARTBEAT_STALE_MULTIPLIER = 2;
 const HEARTBEAT_STALE_MS = HEARTBEAT_INTERVAL_MS * HEARTBEAT_STALE_MULTIPLIER + HEARTBEAT_JITTER_MS;
-const HEALTH_CHECK_INTERVAL_MS = 10000;
-const HEALTH_CHECK_JITTER_MS = 4000;
+const HEALTH_CHECK_INTERVAL_MS = 5000;
+const HEALTH_CHECK_JITTER_MS = 3000;
 
 let heartbeatTimer = null;
 let heartbeatInFlight = false;
@@ -131,6 +131,7 @@ let lastUserActivityAt = 0;
 let consecutiveHeartbeatFailures = 0;
 let healthTimer = null;
 let healthInFlight = false;
+let healthPollingEnabled = false;
 
 const CONNECTION_STATUS = {
   connecting: 'connecting',
@@ -219,21 +220,26 @@ const startHeartbeat = () => {
 };
 
 const stopHealthPolling = () => {
+  healthPollingEnabled = false;
   clearTimeout(healthTimer);
   healthTimer = null;
 };
 
 const scheduleHealthCheck = () => {
+  if (!healthPollingEnabled) return;
   const jitter = Math.floor(Math.random() * HEALTH_CHECK_JITTER_MS);
   clearTimeout(healthTimer);
   healthTimer = setTimeout(async () => {
+    if (!healthPollingEnabled) return;
     await checkHealth();
+    if (!healthPollingEnabled) return;
     scheduleHealthCheck();
   }, HEALTH_CHECK_INTERVAL_MS + jitter);
 };
 
 const startHealthPolling = () => {
-  if (healthTimer) return;
+  if (healthPollingEnabled) return;
+  healthPollingEnabled = true;
   scheduleHealthCheck();
 };
 
@@ -249,7 +255,7 @@ const checkHealth = async () => {
   healthInFlight = true;
   setConnectionStatus(CONNECTION_STATUS.recovering);
   try {
-    const res = await fetch('/api/health');
+    const res = await fetch(`/api/health?ts=${Date.now()}`);
     if (!res.ok) {
       throw new Error(`health failed: ${res.status}`);
     }
