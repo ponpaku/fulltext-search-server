@@ -1,7 +1,6 @@
 from backend.routes import create_app, run
 
-SYSTEM_VERSION = "1.1.11"
-# File Version: 1.0.1
+SYSTEM_VERSION = "1.2.0"
 
 app = create_app()
 

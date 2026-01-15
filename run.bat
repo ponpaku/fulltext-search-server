@@ -1,7 +1,6 @@
 @echo off
 setlocal
-rem System Version: 1.1.11
-rem File Version: 1.0.1
+rem System Version: 1.2.0
 
 rem Root dir of this project
 set "PROJECT_ROOT=%~dp0"

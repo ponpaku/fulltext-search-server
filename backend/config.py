@@ -6,8 +6,7 @@ from typing import Dict, List
 
 from dotenv import load_dotenv, find_dotenv
 
-SYSTEM_VERSION = "1.1.11"
-# File Version: 1.0.0
+SYSTEM_VERSION = "1.2.0"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BASE_DIR = PROJECT_ROOT

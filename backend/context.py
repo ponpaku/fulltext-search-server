@@ -6,8 +6,7 @@ from typing import Dict, List
 
 from .config import AppConfig
 
-SYSTEM_VERSION = "1.1.11"
-# File Version: 1.0.1
+SYSTEM_VERSION = "1.2.0"
 
 
 @dataclass
@@ -19,7 +18,7 @@ class AppState:
     memory_pages: Dict[str, List[Dict]] = field(default_factory=dict)
     index_failures: Dict[str, Dict[str, str]] = field(default_factory=dict)
     cache_lock: threading.RLock = field(default_factory=threading.RLock)
-    memory_cache = None
+    memory_cache: "MemoryCache | None" = None
     query_stats: Dict[str, Dict] = field(default_factory=dict)
     fixed_cache_index: Dict[str, Dict] = field(default_factory=dict)
     fixed_cache_dirty: bool = False
@@ -35,10 +34,10 @@ class AppState:
     worker_shared_mm: Dict[str, mmap.mmap] = field(default_factory=dict)
     worker_shared_files: Dict[str, object] = field(default_factory=dict)
     search_semaphore: asyncio.Semaphore | None = None
-    rw_lock = None
+    rw_lock: "AsyncRWLock | None" = None
     search_worker_count: int = 1
     search_concurrency: int = 1
-    search_executor = None
+    search_executor: "ProcessPoolExecutor | None" = None
     search_execution_mode: str = "thread"
     normalize_mode_warning_emitted: bool = False
     active_client_heartbeats: Dict[str, float] = field(default_factory=dict)
