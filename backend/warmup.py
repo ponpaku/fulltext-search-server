@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,6 +20,7 @@ SYSTEM_VERSION = "1.2.0"
 # Module-level state
 _last_warmup_ts: float = 0.0
 _last_warmup_mono: float = 0.0  # monotonic time for interval checks
+_warmup_lock = threading.Lock()  # Short-term lock to prevent concurrent warmup
 
 
 def _warmup_lock_path(gen_name: str) -> Path:
@@ -93,7 +95,10 @@ def _read_touch_file(
 
 
 def run_warmup_once(reason: str, gen_name: str | None = None) -> bool:
-    """Run warmup for a generation exactly once (per-generation lock).
+    """Run warmup for a generation.
+
+    For startup/generation_switch: runs exactly once per generation (file lock).
+    For keep-warm: runs periodically when idle (short-term thread lock only).
 
     Args:
         reason: Reason for warmup (startup, generation_switch, keep-warm)
@@ -127,82 +132,87 @@ def run_warmup_once(reason: str, gen_name: str | None = None) -> bool:
         log_warn(f"warmupスキップ: gen_{gen_name} が見つかりません reason={reason}")
         return False
 
-    # For keep-warm, skip if this generation was already warmed
-    # For startup/generation_switch, try to acquire lock
-    if reason == "keep-warm":
-        lock_path = _warmup_lock_path(gen_name)
-        if lock_path.exists():
-            # Already warmed this generation, just update timestamp
-            _last_warmup_ts = time.time()
-            _last_warmup_mono = time.monotonic()
+    # For startup/generation_switch: use generation lock (once per generation)
+    # For keep-warm: skip generation lock (run periodically)
+    use_generation_lock = reason != "keep-warm"
+
+    if use_generation_lock:
+        # Try to acquire generation lock (atomic, persistent)
+        if not _try_acquire_generation_lock(gen_name):
+            log_notice(f"warmupスキップ: 世代 {gen_name} は既に実行済み reason={reason}")
             return False
 
-    # Try to acquire generation lock (atomic)
-    if not _try_acquire_generation_lock(gen_name):
-        log_notice(f"warmupスキップ: 世代 {gen_name} は既に実行済み reason={reason}")
-        return False
+        # Double-check gen_dir still exists after lock acquisition
+        if not gen_dir.exists():
+            log_warn(f"warmup失敗: gen_{gen_name} がロック取得後に消失")
+            _remove_warmup_lock(gen_name)
+            return False
+    else:
+        # For keep-warm: use short-term thread lock to prevent concurrent execution
+        if not _warmup_lock.acquire(blocking=False):
+            log_notice(f"warmupスキップ: 既に実行中 reason={reason}")
+            return False
 
-    # Double-check gen_dir still exists after lock acquisition
-    if not gen_dir.exists():
-        log_warn(f"warmup失敗: gen_{gen_name} がロック取得後に消失")
-        _remove_warmup_lock(gen_name)
-        return False
+    try:
+        # Get warmup parameters from environment
+        head_mb = env_int("WARMUP_HEAD_MB", 2)
+        stride_mb = env_int("WARMUP_STRIDE_MB", 4)
+        max_mb = env_int("WARMUP_MAX_MB", 0)
+        max_files = env_int("WARMUP_MAX_FILES", 40)
 
-    # Get warmup parameters from environment
-    head_mb = env_int("WARMUP_HEAD_MB", 2)
-    stride_mb = env_int("WARMUP_STRIDE_MB", 4)
-    max_mb = env_int("WARMUP_MAX_MB", 0)
-    max_files = env_int("WARMUP_MAX_FILES", 40)
+        # Collect files to warm
+        files = sorted([p for p in gen_dir.iterdir() if p.is_file()])
+        if not files:
+            log_notice(f"warmup対象なし: gen_{gen_name}")
+            _last_warmup_ts = time.time()
+            _last_warmup_mono = time.monotonic()
+            return True
 
-    # Collect files to warm
-    files = sorted([p for p in gen_dir.iterdir() if p.is_file()])
-    if not files:
-        log_notice(f"warmup対象なし: gen_{gen_name}")
+        # Limit number of files if specified
+        if max_files > 0:
+            files = files[:max_files]
+
+        max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else None
+        head_bytes = head_mb * 1024 * 1024
+        stride_bytes = stride_mb * 1024 * 1024
+        page_bytes = 4096
+
+        log_info(
+            f"warmup開始: reason={reason} role={role} gen={gen_name} "
+            f"files={len(files)} head={head_mb}MB stride={stride_mb}MB max={max_mb}MB"
+        )
+
+        start = time.time()
+        total_bytes = 0
+        touched_files = 0
+
+        for path in files:
+            if max_bytes is not None and total_bytes >= max_bytes:
+                break
+            bytes_read = _read_touch_file(
+                path,
+                head_bytes,
+                stride_bytes,
+                page_bytes,
+                max_bytes - total_bytes if max_bytes is not None else None,
+            )
+            if bytes_read:
+                touched_files += 1
+                total_bytes += bytes_read
+
+        elapsed = time.time() - start
         _last_warmup_ts = time.time()
         _last_warmup_mono = time.monotonic()
-        return True
 
-    # Limit number of files if specified
-    if max_files > 0:
-        files = files[:max_files]
-
-    max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else None
-    head_bytes = head_mb * 1024 * 1024
-    stride_bytes = stride_mb * 1024 * 1024
-    page_bytes = 4096
-
-    log_info(
-        f"warmup開始: reason={reason} role={role} gen={gen_name} "
-        f"files={len(files)} head={head_mb}MB stride={stride_mb}MB max={max_mb}MB"
-    )
-
-    start = time.time()
-    total_bytes = 0
-    touched_files = 0
-
-    for path in files:
-        if max_bytes is not None and total_bytes >= max_bytes:
-            break
-        bytes_read = _read_touch_file(
-            path,
-            head_bytes,
-            stride_bytes,
-            page_bytes,
-            max_bytes - total_bytes if max_bytes is not None else None,
+        log_info(
+            f"warmup完了: reason={reason} role={role} gen={gen_name} "
+            f"files={touched_files}/{len(files)} bytes={total_bytes} elapsed={elapsed:.2f}s"
         )
-        if bytes_read:
-            touched_files += 1
-            total_bytes += bytes_read
-
-    elapsed = time.time() - start
-    _last_warmup_ts = time.time()
-    _last_warmup_mono = time.monotonic()
-
-    log_info(
-        f"warmup完了: reason={reason} role={role} gen={gen_name} "
-        f"files={touched_files}/{len(files)} bytes={total_bytes} elapsed={elapsed:.2f}s"
-    )
-    return True
+        return True
+    finally:
+        # Release thread lock for keep-warm
+        if not use_generation_lock:
+            _warmup_lock.release()
 
 
 async def trigger_warmup(reason: str, gen_name: str | None = None) -> bool:
