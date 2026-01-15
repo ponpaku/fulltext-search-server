@@ -13,6 +13,7 @@ from pdfminer.layout import LAParams, LTTextBoxVertical, LTTextContainer
 from pdfminer.pdfpage import PDFPage
 
 from .text_utils import split_non_pdf_text
+from .utils import log_warn
 
 SYSTEM_VERSION = "1.1.11"
 # File Version: 1.0.0
@@ -20,31 +21,40 @@ SYSTEM_VERSION = "1.1.11"
 
 def read_text_file_safe(path: str) -> str:
     encodings = ["utf-8", "cp932", "shift_jis", "euc-jp"]
+    last_error = None
     for enc in encodings:
         try:
             with open(path, "r", encoding=enc) as f:
                 return f.read()
-        except Exception:
+        except Exception as e:
+            last_error = e
             continue
+    if last_error:
+        log_warn(f"read_text_file_safe failed: {path}: {type(last_error).__name__}: {last_error}")
     return ""
 
 
 def read_csv_file_safe(path: str) -> str:
     encodings = ["utf-8", "cp932", "shift_jis"]
+    last_error = None
     for enc in encodings:
         try:
             with open(path, "r", encoding=enc, newline="") as f:
                 reader = csv.reader(f)
                 return "\n".join([" ".join(row) for row in reader])
-        except Exception:
+        except Exception as e:
+            last_error = e
             continue
+    if last_error:
+        log_warn(f"read_csv_file_safe failed: {path}: {type(last_error).__name__}: {last_error}")
     return ""
 
 
 def read_excel_rows_xlsx(path: str) -> List[Tuple[str, int, str]]:
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
-    except Exception:
+    except Exception as e:
+        log_warn(f"read_excel_rows_xlsx open failed: {path}: {type(e).__name__}: {e}")
         return []
 
     rows: List[Tuple[str, int, str]] = []
@@ -61,7 +71,8 @@ def read_excel_rows_xlsx(path: str) -> List[Tuple[str, int, str]]:
                 ]
                 if cells:
                     rows.append((sheet_name, row_idx, " ".join(cells)))
-    except Exception:
+    except Exception as e:
+        log_warn(f"read_excel_rows_xlsx read failed: {path}: {type(e).__name__}: {e}")
         return []
     finally:
         try:
@@ -74,11 +85,12 @@ def read_excel_rows_xlsx(path: str) -> List[Tuple[str, int, str]]:
 def read_excel_rows_xls(path: str) -> List[Tuple[str, int, str]]:
     try:
         import xlrd
-    except Exception:
+    except ImportError:
         return []
     try:
         wb = xlrd.open_workbook(path)
-    except Exception:
+    except Exception as e:
+        log_warn(f"read_excel_rows_xls open failed: {path}: {type(e).__name__}: {e}")
         return []
 
     rows: List[Tuple[str, int, str]] = []
@@ -93,7 +105,8 @@ def read_excel_rows_xls(path: str) -> List[Tuple[str, int, str]]:
                 ]
                 if row_values:
                     rows.append((sheet_name, r + 1, " ".join(row_values)))
-    except Exception:
+    except Exception as e:
+        log_warn(f"read_excel_rows_xls read failed: {path}: {type(e).__name__}: {e}")
         return []
     return rows
 
@@ -219,6 +232,7 @@ def extract_text_from_file_with_reason(file_path: str) -> Tuple[Dict[int, str], 
                 with open(file_path_str, "rb") as fp:
                     for i in range(total_pages):
                         try:
+                            fp.seek(0)  # Reset position for each page extraction
                             text = miner_extract_text(fp, page_numbers=[i], laparams=laparams)
                             if text and text.strip():
                                 page_texts[i + 1] = text

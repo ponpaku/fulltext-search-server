@@ -665,9 +665,18 @@ def save_index_to_disk(folder_path: str, cache: Dict[str, Dict], gen_dir: Path |
 def scan_files(folder: str) -> List[Path]:
     root = Path(folder)
     files = []
-    for f in root.rglob("*"):
-        if f.is_file() and f.suffix.lower() in ALLOWED_EXTS:
-            files.append(f)
+    try:
+        for f in root.rglob("*"):
+            try:
+                if f.is_file() and f.suffix.lower() in ALLOWED_EXTS:
+                    files.append(f)
+            except (PermissionError, OSError):
+                # Skip files that can't be accessed
+                continue
+    except (PermissionError, OSError) as e:
+        # Log and continue with partial results if rglob itself fails
+        from .utils import log_warn
+        log_warn(f"scan_files: partial scan due to {type(e).__name__}: {e}")
     return files
 
 

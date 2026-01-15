@@ -21,6 +21,7 @@ from .text_utils import (
     encode_norm_text,
     normalize_invisible_separators,
     normalize_snippet_text,
+    normalize_text,
     normalize_text_minimal,
     normalize_text_nfkc_casefold,
 )
@@ -389,7 +390,11 @@ def search_entries_chunk_shared(
 
 
 def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict]) -> List[Dict]:
-    """Build memory pages from cache for search."""
+    """Build memory pages from cache for search (worker process version).
+
+    Note: This is used when SEARCH_PROCESS_SHARED=0. Unlike routes.py version,
+    displayPath is omitted here; _build_search_result applies host_aliases.
+    """
     from .utils import env_bool
     store_normalized = env_bool("INDEX_STORE_NORMALIZED", True)
     pages: List[Dict] = []
@@ -398,46 +403,46 @@ def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict])
         is_pdf = file_name.lower().endswith(".pdf")
         ext = os.path.splitext(file_name)[1].lower()
         is_excel = ext in {".xlsx", ".xls"}
+        file_id = file_id_from_path(path)
         data = meta.get("data")
         if not data:
             continue
-        for page, text in data.items():
-            if is_pdf:
-                page_label = f"p{page}"
-            elif is_excel:
-                page_label = str(page)
-            else:
-                page_label = f"p{page}"
-            norm_all = meta.get("norm_all", {}).get(str(page)) if store_normalized else None
-            norm_jp = meta.get("norm_jp", {}).get(str(page)) if store_normalized else None
-            if not norm_all:
-                norm_all = normalize_text_nfkc_casefold(text, compress_spaces=True)
-                norm_all = apply_space_mode(norm_all, "all")
-            if not norm_jp:
-                norm_jp = normalize_text_nfkc_casefold(text, compress_spaces=True)
-                norm_jp = apply_space_mode(norm_jp, "jp")
-            norm_cf = normalize_text_nfkc_casefold(text, compress_spaces=True)
-            norm_strict = normalize_text_minimal(text)
-            norm_strict_all = apply_space_mode(norm_strict, "all")
-            norm_strict_jp = apply_space_mode(norm_strict, "jp")
+        for page_num, raw_text in data.items():
+            if not raw_text:
+                continue
+            # Use same normalization as routes.py
+            norm_base = normalize_text(raw_text)
+            norm_strict = normalize_text_minimal(raw_text)
+            norm_cf_base = (
+                normalize_text_nfkc_casefold(raw_text) if store_normalized else ""
+            )
+            # Use "-" for non-PDF/Excel (consistent with routes.py)
+            page_display = "-" if not (is_pdf or is_excel) else page_num
             entry = {
                 "folderId": folder_id,
                 "folderName": folder_name,
                 "file": file_name,
                 "path": path,
-                "page": page_label,
-                "pageRaw": page,
-                "raw": text,
-                "norm": norm_cf,
-                "norm_all": norm_all,
-                "norm_jp": norm_jp,
-                "norm_cf": norm_cf,
-                "norm_cf_all": norm_all,
-                "norm_cf_jp": norm_jp,
+                # displayPath is omitted; _build_search_result applies host_aliases
+                "page": page_display,
+                "pageRaw": page_num,
+                "raw": raw_text,
+                "norm": norm_base,
+                "norm_jp": apply_space_mode(norm_base, "jp"),
+                "norm_all": apply_space_mode(norm_base, "all"),
                 "norm_strict": norm_strict,
-                "norm_strict_all": norm_strict_all,
-                "norm_strict_jp": norm_strict_jp,
+                "norm_strict_jp": apply_space_mode(norm_strict, "jp"),
+                "norm_strict_all": apply_space_mode(norm_strict, "all"),
+                "fileId": file_id,
             }
+            if store_normalized:
+                entry.update(
+                    {
+                        "norm_cf": norm_cf_base,
+                        "norm_cf_jp": apply_space_mode(norm_cf_base, "jp"),
+                        "norm_cf_all": apply_space_mode(norm_cf_base, "all"),
+                    }
+                )
             pages.append(entry)
     return pages
 

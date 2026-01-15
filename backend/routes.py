@@ -1670,7 +1670,7 @@ async def get_folder_files(folder_id: str, scope: str = "indexed"):
 
 @app.get("/api/detail")
 async def get_detail(
-    file_id: str = Query(..., min_length=8, max_length=8, pattern=r"^[0-9a-f]{8}$"),
+    file_id: str = Query(..., min_length=12, max_length=12, pattern=r"^[0-9a-f]{12}$"),
     page: str = Query(..., min_length=1),
     hit_pos: int = Query(0, ge=0),
 ):
