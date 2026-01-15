@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .config import INDEX_DIR
-from .index_ops import get_current_generation_dir, get_current_generation_pointer
+from .index_ops import get_current_generation_pointer, get_generation_dir
 from .utils import env_bool, env_int, is_primary_process, log_info, log_notice, log_warn, process_role
 
 if TYPE_CHECKING:
@@ -18,11 +18,45 @@ SYSTEM_VERSION = "1.2.0"
 
 # Module-level state
 _last_warmup_ts: float = 0.0
+_last_warmup_mono: float = 0.0  # monotonic time for interval checks
+
+
+def _is_warmup_enabled() -> bool:
+    """Check if warmup is enabled (with legacy env fallback).
+
+    Checks WARMUP_ENABLED first, then falls back to legacy WARMUP_ENABLE.
+    Default is True (enabled).
+    """
+    # Check new env variable first
+    new_val = os.getenv("WARMUP_ENABLED", "").strip().lower()
+    if new_val:
+        return new_val in {"1", "true", "yes"}
+
+    # Fallback to legacy env variable
+    legacy_val = os.getenv("WARMUP_ENABLE", "").strip().lower()
+    if legacy_val:
+        return legacy_val in {"1", "true", "yes"}
+
+    # Default is True
+    return True
 
 
 def _warmup_lock_path(gen_name: str) -> Path:
     """Get the lock file path for a generation."""
     return INDEX_DIR / f".warmup_{gen_name}.lock"
+
+
+def _remove_warmup_lock(gen_name: str) -> bool:
+    """Remove warmup lock file for a generation.
+
+    Returns True if removed, False otherwise.
+    """
+    lock_path = _warmup_lock_path(gen_name)
+    try:
+        lock_path.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def _try_acquire_generation_lock(gen_name: str) -> bool:
@@ -88,7 +122,7 @@ def run_warmup_once(reason: str, gen_name: str | None = None) -> bool:
     Returns:
         True if warmup was executed, False if skipped
     """
-    global _last_warmup_ts
+    global _last_warmup_ts, _last_warmup_mono
 
     role = process_role()
     if not is_primary_process():
@@ -102,10 +136,15 @@ def run_warmup_once(reason: str, gen_name: str | None = None) -> bool:
         log_warn(f"warmupスキップ: 世代が見つかりません reason={reason}")
         return False
 
-    # Check if warmup is enabled
-    warmup_enabled = env_bool("WARMUP_ENABLED", True)
-    if not warmup_enabled:
-        log_notice(f"warmupスキップ: WARMUP_ENABLED=0 reason={reason} gen={gen_name}")
+    # Check if warmup is enabled (with legacy env fallback)
+    if not _is_warmup_enabled():
+        log_notice(f"warmupスキップ: disabled reason={reason} gen={gen_name}")
+        return False
+
+    # Get generation directory BEFORE acquiring lock
+    gen_dir = get_generation_dir(gen_name)
+    if not gen_dir.exists():
+        log_warn(f"warmupスキップ: gen_{gen_name} が見つかりません reason={reason}")
         return False
 
     # For keep-warm, skip if this generation was already warmed
@@ -115,6 +154,7 @@ def run_warmup_once(reason: str, gen_name: str | None = None) -> bool:
         if lock_path.exists():
             # Already warmed this generation, just update timestamp
             _last_warmup_ts = time.time()
+            _last_warmup_mono = time.monotonic()
             return False
 
     # Try to acquire generation lock (atomic)
@@ -122,10 +162,10 @@ def run_warmup_once(reason: str, gen_name: str | None = None) -> bool:
         log_notice(f"warmupスキップ: 世代 {gen_name} は既に実行済み reason={reason}")
         return False
 
-    # Get generation directory
-    gen_dir = get_current_generation_dir()
+    # Double-check gen_dir still exists after lock acquisition
     if not gen_dir.exists():
-        log_warn(f"warmup失敗: gen_{gen_name} が見つかりません")
+        log_warn(f"warmup失敗: gen_{gen_name} がロック取得後に消失")
+        _remove_warmup_lock(gen_name)
         return False
 
     # Get warmup parameters from environment
@@ -139,6 +179,7 @@ def run_warmup_once(reason: str, gen_name: str | None = None) -> bool:
     if not files:
         log_notice(f"warmup対象なし: gen_{gen_name}")
         _last_warmup_ts = time.time()
+        _last_warmup_mono = time.monotonic()
         return True
 
     # Limit number of files if specified
@@ -175,6 +216,7 @@ def run_warmup_once(reason: str, gen_name: str | None = None) -> bool:
 
     elapsed = time.time() - start
     _last_warmup_ts = time.time()
+    _last_warmup_mono = time.monotonic()
 
     log_info(
         f"warmup完了: reason={reason} role={role} gen={gen_name} "
@@ -191,31 +233,38 @@ async def trigger_warmup(reason: str, gen_name: str | None = None) -> bool:
 
 def should_run_keep_warm(
     last_search_ts: float,
-    last_warmup_ts: float,
+    last_warmup_mono: float,
     active_client_count: int,
     idle_sec: int,
     interval_sec: int,
+    now_ts: float | None = None,
+    now_mono: float | None = None,
 ) -> bool:
     """Determine if keep-warm should run based on state.
 
     Args:
-        last_search_ts: Timestamp of last search
-        last_warmup_ts: Timestamp of last warmup
+        last_search_ts: Timestamp of last search (time.time())
+        last_warmup_mono: Monotonic time of last warmup (time.monotonic())
         active_client_count: Number of active clients
         idle_sec: Required idle time in seconds
         interval_sec: Minimum interval between warmups
+        now_ts: Current time.time() (optional, for testing)
+        now_mono: Current time.monotonic() (optional, for testing)
 
     Returns:
         True if keep-warm should run
     """
-    now = time.time()
+    if now_ts is None:
+        now_ts = time.time()
+    if now_mono is None:
+        now_mono = time.monotonic()
 
-    # Check if idle long enough
-    if now - last_search_ts < idle_sec:
+    # Check if idle long enough (use wall clock for search timestamp)
+    if now_ts - last_search_ts < idle_sec:
         return False
 
-    # Check if interval has passed since last warmup
-    if now - last_warmup_ts < interval_sec:
+    # Check if interval has passed since last warmup (use monotonic to avoid clock skew)
+    if now_mono - last_warmup_mono < interval_sec:
         return False
 
     # Check if no active clients
@@ -231,7 +280,8 @@ async def keep_warm_loop(state: AppState) -> None:
     Args:
         state: Application state containing last_search_ts, active_client_heartbeats, etc.
     """
-    if not env_bool("WARMUP_ENABLED", True):
+    # Check with legacy env fallback
+    if not _is_warmup_enabled():
         return
     if not is_primary_process():
         return
@@ -239,10 +289,11 @@ async def keep_warm_loop(state: AppState) -> None:
     # Get configuration
     idle_sec = env_int("WARMUP_IDLE_SEC", 1800)  # 30 minutes default
     interval_sec = env_int("WARMUP_INTERVAL_SEC", 3600)  # 1 hour default
-    check_interval = min(60, idle_sec // 10)  # Check frequently but not too often
+    # Ensure check_interval is at least 1 second to avoid busy loop
+    check_interval = max(1, min(60, idle_sec // 10))
 
     role = process_role()
-    log_info(f"keep-warmループ開始: role={role} idle={idle_sec}s interval={interval_sec}s")
+    log_info(f"keep-warmループ開始: role={role} idle={idle_sec}s interval={interval_sec}s check={check_interval}s")
 
     try:
         while True:
@@ -251,19 +302,18 @@ async def keep_warm_loop(state: AppState) -> None:
             # Get active client count (thread-safe)
             with state.active_client_lock:
                 ttl_sec = env_int("HEARTBEAT_TTL_SEC", 90)
-                now = time.time()
+                now_ts = time.time()
                 active_count = sum(
                     1 for ts in state.active_client_heartbeats.values()
-                    if now - ts < ttl_sec
+                    if now_ts - ts < ttl_sec
                 )
 
-            # Get last search timestamp from state
+            # Get last search timestamp from state (wall clock)
             last_search = getattr(state, 'last_search_ts', 0.0)
-            last_warmup = getattr(state, 'last_warmup_ts', _last_warmup_ts)
 
-            # Check if we should run keep-warm
+            # Check if we should run keep-warm (use monotonic time for warmup interval)
             if not should_run_keep_warm(
-                last_search, last_warmup, active_count, idle_sec, interval_sec
+                last_search, _last_warmup_mono, active_count, idle_sec, interval_sec
             ):
                 continue
 
@@ -272,7 +322,7 @@ async def keep_warm_loop(state: AppState) -> None:
             if gen_name:
                 log_notice(f"keep-warm実行: idle={time.time() - last_search:.0f}s active_clients={active_count}")
                 await trigger_warmup("keep-warm", gen_name)
-                # Update state timestamp
+                # Update state timestamp (wall clock for external use)
                 if hasattr(state, 'last_warmup_ts'):
                     state.last_warmup_ts = time.time()
     except asyncio.CancelledError:
