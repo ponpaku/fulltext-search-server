@@ -21,8 +21,7 @@ from .config import (
 from .extractors import extract_text_from_file_with_reason
 from .utils import env_bool, env_int, log_info, log_notice, log_warn
 
-SYSTEM_VERSION = "1.1.11"
-# File Version: 1.0.0
+SYSTEM_VERSION = "1.2.0"
 
 
 def create_generation_uuid() -> str:

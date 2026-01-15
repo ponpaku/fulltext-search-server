@@ -27,8 +27,7 @@ from .text_utils import (
 )
 from .utils import file_id_from_path, log_info
 
-SYSTEM_VERSION = "1.1.11"
-# File Version: 1.0.0
+SYSTEM_VERSION = "1.2.0"
 
 # Worker process globals
 WORKER_MEMORY_PAGES: Dict[str, List[Dict]] = {}

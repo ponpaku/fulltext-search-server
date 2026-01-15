@@ -2,6 +2,7 @@ import asyncio
 import csv
 import gzip
 import hashlib
+import io
 import json
 import mmap
 import os
@@ -16,14 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-SYSTEM_VERSION = "1.1.11"
-# File Version: 2.0.0
+SYSTEM_VERSION = "1.2.0"
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
-import io
 
 from .config import (
     ALLOWED_EXTS,

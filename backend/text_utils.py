@@ -7,8 +7,7 @@ from typing import Dict, List
 
 from .config import DETAIL_CONTEXT_PREFIX, DETAIL_WINDOW_SIZE
 
-SYSTEM_VERSION = "1.1.11"
-# File Version: 1.0.0
+SYSTEM_VERSION = "1.2.0"
 
 CID_PATTERN = re.compile(r"\(cid:\d+\)", re.IGNORECASE)
 INVISIBLE_SEPARATORS_PATTERN = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff\u00a0\u202f]")

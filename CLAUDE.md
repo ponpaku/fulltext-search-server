@@ -1,7 +1,6 @@
 # CLAUDE.md
 
-System Version: 1.1.11
-CLAUDE File Version: 1.0.1
+System Version: 1.2.0
 
 ## 1. Project Context
 - ローカル/社内フォルダの PDF/Office 文書を全文検索する FastAPI アプリ（UI は `static/` の静的配信）。
@@ -21,9 +20,7 @@ CLAUDE File Version: 1.0.1
 
 ## 3. Standard Workflow
 - 変更前に `README.md` と `AGENTS.md` を確認し、既存仕様と矛盾しないようにする。
-- 変更後は `CHANGELOG.md` を日本語で更新（`## 1.0.0` の日付行に追記）。
-- 変更したファイルの `System Version` / `File Version` を更新する。
-  - 例外: `CHANGELOG.md` は System Version のみ（File Version を追加しない）。
+- 変更後は `CHANGELOG.md` を日本語で更新。
 - 生成物ディレクトリ（`indexes/`, `cache/`, `backups/`）は編集しない。
 
 ## 4. Common Commands
