@@ -136,24 +136,25 @@ def run_warmup_once(reason: str, gen_name: str | None = None) -> bool:
     # For keep-warm: skip generation lock (run periodically)
     use_generation_lock = reason != "keep-warm"
 
-    if use_generation_lock:
-        # Try to acquire generation lock (atomic, persistent)
-        if not _try_acquire_generation_lock(gen_name):
-            log_notice(f"warmupスキップ: 世代 {gen_name} は既に実行済み reason={reason}")
-            return False
-
-        # Double-check gen_dir still exists after lock acquisition
-        if not gen_dir.exists():
-            log_warn(f"warmup失敗: gen_{gen_name} がロック取得後に消失")
-            _remove_warmup_lock(gen_name)
-            return False
-    else:
-        # For keep-warm: use short-term thread lock to prevent concurrent execution
-        if not _warmup_lock.acquire(blocking=False):
-            log_notice(f"warmupスキップ: 既に実行中 reason={reason}")
-            return False
+    # Acquire short-term thread lock first to prevent concurrent warmup
+    # (including concurrent keep-warm and generation_switch)
+    if not _warmup_lock.acquire(blocking=False):
+        log_notice(f"warmupスキップ: 既に実行中 reason={reason}")
+        return False
 
     try:
+        if use_generation_lock:
+            # Try to acquire generation lock (atomic, persistent)
+            if not _try_acquire_generation_lock(gen_name):
+                log_notice(f"warmupスキップ: 世代 {gen_name} は既に実行済み reason={reason}")
+                return False
+
+            # Double-check gen_dir still exists after lock acquisition
+            if not gen_dir.exists():
+                log_warn(f"warmup失敗: gen_{gen_name} がロック取得後に消失")
+                _remove_warmup_lock(gen_name)
+                return False
+
         # Get warmup parameters from environment
         head_mb = env_int("WARMUP_HEAD_MB", 2)
         stride_mb = env_int("WARMUP_STRIDE_MB", 4)
@@ -210,9 +211,7 @@ def run_warmup_once(reason: str, gen_name: str | None = None) -> bool:
         )
         return True
     finally:
-        # Release thread lock for keep-warm
-        if not use_generation_lock:
-            _warmup_lock.release()
+        _warmup_lock.release()
 
 
 async def trigger_warmup(reason: str, gen_name: str | None = None) -> bool:
@@ -309,11 +308,13 @@ async def keep_warm_loop(state: AppState) -> None:
             # Run warmup for current generation
             gen_name = get_current_generation_pointer()
             if gen_name:
-                log_notice(f"keep-warm実行: idle={time.time() - last_search:.0f}s active_clients={active_count}")
-                await trigger_warmup("keep-warm", gen_name)
-                # Update state timestamp (wall clock for external use)
-                if hasattr(state, 'last_warmup_ts'):
-                    state.last_warmup_ts = time.time()
+                idle_time = time.time() - last_search
+                executed = await trigger_warmup("keep-warm", gen_name)
+                if executed:
+                    log_notice(f"keep-warm完了: idle={idle_time:.0f}s active_clients={active_count}")
+                    # Update state timestamp (wall clock for external use)
+                    if hasattr(state, 'last_warmup_ts'):
+                        state.last_warmup_ts = time.time()
     except asyncio.CancelledError:
         log_info("keep-warmループ終了")
         raise
