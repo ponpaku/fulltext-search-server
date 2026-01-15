@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# System Version: 1.0.0
-# File Version: 1.0.0
+# System Version: 1.2.0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}"
@@ -20,4 +19,4 @@ if [[ -f "${PROJECT_ROOT}/requirements.txt" ]]; then
   python -m pip install -r "${PROJECT_ROOT}/requirements.txt"
 fi
 
-python "${PROJECT_ROOT}/web_server.py"
+python "${PROJECT_ROOT}/app.py"

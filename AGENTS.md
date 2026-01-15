@@ -1,6 +1,6 @@
 # System Overview
-System Version: 1.1.11
-AGENTS File Version: 1.0.2
+System Version: 1.2.0
+
 - Stack: FastAPI backend with a static UI (`static/`) and in-memory search data.
 - Inputs: folders from `SEARCH_FOLDERS`; optional SMB path parsing and display aliases via `SEARCH_FOLDER_ALIASES`.
 - Indexing: extracts text from PDF/DOCX/TXT/CSV/XLSX/XLS and caches per-file text in gzip pickles under `indexes/`.
@@ -60,4 +60,3 @@ AGENTS File Version: 1.0.2
 
 # Change Log Policy
 - `CHANGELOG.md` を日本語で更新してください。
-- Keep System Version and File Version in each file.

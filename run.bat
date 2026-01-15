@@ -1,7 +1,6 @@
 @echo off
 setlocal
-rem System Version: 1.0.0
-rem File Version: 1.0.0
+rem System Version: 1.2.0
 
 rem Root dir of this project
 set "PROJECT_ROOT=%~dp0"
@@ -18,5 +17,5 @@ if exist "%PROJECT_ROOT%requirements.txt" (
     pip install -r "%PROJECT_ROOT%requirements.txt"
 )
 
-python "%PROJECT_ROOT%web_server.py"
+python "%PROJECT_ROOT%app.py"
 popd
