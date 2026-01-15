@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import mmap
+import multiprocessing
 import os
 import pickle
 import re
@@ -433,8 +434,9 @@ class HeartbeatRequest(BaseModel):
 async def lifespan(app: FastAPI):
     init_folder_states()
     install_asyncio_exception_filter()
-    global search_semaphore, rw_lock, search_worker_count, search_executor, search_execution_mode, search_concurrency, fixed_cache_index, memory_cache, query_stats, query_stats_dirty, query_stats_last_saved, folder_order
+    global search_semaphore, rw_lock, search_worker_count, search_executor, search_execution_mode, search_concurrency, fixed_cache_index, memory_cache, query_stats, query_stats_dirty, query_stats_last_saved, folder_order, last_search_ts
     rw_lock = AsyncRWLock()
+    last_search_ts = time.time()
     memory_cache = MemoryCache(
         DEFAULT_CACHE_MAX_ENTRIES,
         DEFAULT_CACHE_MAX_MB * 1024 * 1024,
@@ -511,12 +513,17 @@ async def lifespan(app: FastAPI):
     announce_task = asyncio.create_task(announce_access_urls())
     rebuild_fixed_cache()
     schedule_task = asyncio.create_task(schedule_index_rebuild())
+    keepwarm_task = None
+    if env_bool("KEEPWARM_ENABLE", False):
+        keepwarm_task = asyncio.create_task(keepwarm_loop())
     try:
         yield
     finally:
-        for task in (announce_task, schedule_task):
+        for task in (announce_task, schedule_task, keepwarm_task):
+            if task is None:
+                continue
             task.cancel()
-        await asyncio.gather(announce_task, schedule_task, return_exceptions=True)
+        await asyncio.gather(announce_task, schedule_task, *(t for t in (keepwarm_task,) if t), return_exceptions=True)
         if search_executor:
             search_executor.shutdown(wait=True)
 
@@ -568,6 +575,8 @@ file_id_map: Dict[str, Dict[str, str]] = {}
 file_id_lock = threading.RLock()
 active_client_lock = threading.Lock()
 active_client_heartbeats: Dict[str, float] = {}
+warmup_lock = threading.Lock()
+last_search_ts = time.time()
 
 state = AppState(
     configured_folders=configured_folders,
@@ -897,6 +906,8 @@ def build_all_indexes():
         grace_sec = env_int("INDEX_CLEANUP_GRACE_SEC", 300)
         cleanup_old_generations(gen_name, grace_sec)
 
+        warmup_index_files("index-ready")
+
         log_info("インデックス構築完了")
 
     except Exception as e:
@@ -956,6 +967,151 @@ def normalize_mode_label(mode: str) -> str:
     if mode == "normalized":
         return "ゆらぎ吸収"
     return "厳格（最小整形）"
+
+
+def warmup_process_role() -> str:
+    role = os.getenv("WARMUP_PROCESS_ROLE", "").strip().lower()
+    if role:
+        return role
+    if multiprocessing.current_process().name != "MainProcess":
+        return "worker"
+    return "main"
+
+
+def is_warmup_process() -> bool:
+    return warmup_process_role() in {"main", "manager"}
+
+
+def warmup_file_reads(
+    files: List[Path],
+    head_mb: int,
+    stride_mb: int,
+    max_mb: int,
+    reason: str,
+    index_uuid: str | None,
+) -> None:
+    role = warmup_process_role()
+    if not is_warmup_process():
+        log_info(f"ウォームアップスキップ: reason={reason} process={role}")
+        return
+    if not warmup_lock.acquire(blocking=False):
+        log_info(f"ウォームアップスキップ: reason={reason} 他の処理が実行中")
+        return
+    start = time.time()
+    total_bytes = 0
+    total_files = 0
+    max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else None
+    head_bytes = max(0, head_mb) * 1024 * 1024
+    stride_bytes = max(0, stride_mb) * 1024 * 1024
+    page_bytes = 4096
+    try:
+        log_info(
+            "ウォームアップ開始: "
+            f"reason={reason} index_uuid={index_uuid or 'unknown'} "
+            f"files={len(files)} head_mb={head_mb} stride_mb={stride_mb} "
+            f"max_mb={max_mb} process={role}"
+        )
+        for path in files:
+            if max_bytes is not None and total_bytes >= max_bytes:
+                break
+            if not path.is_file():
+                continue
+            try:
+                size = path.stat().st_size
+            except Exception:
+                continue
+            if size <= 0:
+                continue
+            total_files += 1
+            try:
+                with open(path, "rb") as f:
+                    remaining_head = min(size, head_bytes)
+                    while remaining_head > 0:
+                        remaining_budget = (
+                            max_bytes - total_bytes
+                            if max_bytes is not None
+                            else remaining_head
+                        )
+                        if remaining_budget <= 0:
+                            break
+                        chunk = f.read(min(256 * 1024, remaining_head, remaining_budget))
+                        if not chunk:
+                            break
+                        read_len = len(chunk)
+                        total_bytes += read_len
+                        remaining_head -= read_len
+                        if max_bytes is not None and total_bytes >= max_bytes:
+                            break
+                    if stride_bytes > 0 and (max_bytes is None or total_bytes < max_bytes):
+                        offset = max(head_bytes, 0)
+                        while offset < size:
+                            if max_bytes is not None and total_bytes >= max_bytes:
+                                break
+                            try:
+                                f.seek(offset)
+                            except Exception:
+                                break
+                            remaining_budget = (
+                                max_bytes - total_bytes if max_bytes is not None else page_bytes
+                            )
+                            if remaining_budget <= 0:
+                                break
+                            chunk = f.read(min(page_bytes, remaining_budget))
+                            if not chunk:
+                                break
+                            total_bytes += len(chunk)
+                            offset += stride_bytes
+            except Exception:
+                continue
+    finally:
+        warmup_lock.release()
+    elapsed = time.time() - start
+    log_info(
+        "ウォームアップ完了: "
+        f"reason={reason} index_uuid={index_uuid or 'unknown'} "
+        f"files={total_files} bytes={total_bytes} "
+        f"time={elapsed:.1f}s process={role}"
+    )
+
+
+def warmup_index_files(
+    reason: str,
+    max_mb: int | None = None,
+    require_enable: bool = True,
+) -> None:
+    if require_enable and not env_bool("WARMUP_ENABLE", False):
+        return
+    gen_dir = get_current_generation_dir()
+    if not gen_dir or not gen_dir.exists():
+        log_warn(f"ウォームアップ対象がありません: reason={reason}")
+        return
+    head_mb = env_int("WARMUP_HEAD_MB", 2)
+    stride_mb = env_int("WARMUP_STRIDE_MB", 4)
+    warmup_max_mb = env_int("WARMUP_MAX_MB", 512)
+    if max_mb is None:
+        max_mb = warmup_max_mb
+    files = sorted([p for p in gen_dir.iterdir() if p.is_file()])
+    index_uuid = get_current_generation_pointer()
+    warmup_file_reads(files, head_mb, stride_mb, max_mb, reason, index_uuid)
+
+
+async def keepwarm_loop() -> None:
+    idle_minutes = env_int("KEEPWARM_IDLE_MINUTES", 10)
+    interval_minutes = env_int("KEEPWARM_INTERVAL_MINUTES", 10)
+    max_mb = env_int("KEEPWARM_MAX_MB", env_int("WARMUP_MAX_MB", 512))
+    while True:
+        await asyncio.sleep(max(1, interval_minutes) * 60)
+        if not env_bool("KEEPWARM_ENABLE", False):
+            continue
+        if not is_warmup_process():
+            continue
+        idle_sec = max(1, idle_minutes) * 60
+        now = time.time()
+        if now - last_search_ts < idle_sec:
+            continue
+        if get_active_client_count() > 0:
+            continue
+        warmup_index_files("keepwarm", max_mb=max_mb, require_enable=False)
 
 
 class MemoryCache:
@@ -1804,9 +1960,10 @@ def _try_get_fixed_cache(
 
 @app.post("/api/search")
 async def search(req: SearchRequest):
-    global rw_lock, search_semaphore, search_executor, search_execution_mode
+    global rw_lock, search_semaphore, search_executor, search_execution_mode, last_search_ts
     if rw_lock is None or search_semaphore is None:
         raise HTTPException(status_code=503, detail="検索システムの初期化中です")
+    last_search_ts = time.time()
 
     # Normal search (full index scan)
     async with search_semaphore:
@@ -1915,9 +2072,10 @@ async def search(req: SearchRequest):
 @app.post("/api/export")
 async def export_results(req: SearchRequest, format: str = "csv"):
     """検索結果をCSV/JSON形式でエクスポートする"""
-    global rw_lock, search_semaphore, search_executor, search_execution_mode
+    global rw_lock, search_semaphore, search_executor, search_execution_mode, last_search_ts
     if rw_lock is None or search_semaphore is None:
         raise HTTPException(status_code=503, detail="検索システムの初期化中です")
+    last_search_ts = time.time()
 
     # Validate format
     if format not in ["csv", "json"]:
