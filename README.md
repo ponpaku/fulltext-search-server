@@ -58,12 +58,16 @@ chmod +x run.sh
 
 ## 設定
 ### config.json（アプリ設定）
-`config.example.json` をコピーして `config.json` を作成し、アプリ設定を記載してください。  
-`config.json` が見つからない場合は `config.example.json` を自動コピーして起動を停止します。  
-保存場所を変える場合は `.env` の `CONFIG_PATH` を利用してください。  
+`config.example.json` をコピーして `config.json` を作成し、アプリ設定を記載してください。
+`config.json` が見つからない場合は起動を停止します。
+保存場所を変える場合は `.env` の `CONFIG_PATH` を利用してください。
 
-**優先順位**: `.env / OS環境変数` > `config.json` > 既定値  
-（運用で即時切替したい値は `.env` 側で上書きできます）
+**優先順位**: `.env / OS環境変数` > `config.json` > 既定値
+（運用で即時切替したい値は `.env` 側で上書きできます。`.env` に空値 `VAR=` を指定した場合は未設定として扱われ、config.json の値が適用されます。）
+
+#### 旧バージョンからの移行
+1.2.0 以前で `.env` に記載していた設定項目（`SEARCH_FOLDERS`, `SEARCH_FOLDER_ALIASES` など）は `config.json` へ移管してください。
+運用中に一時的に値を変えたい場合のみ `.env` を利用します。
 
 ```json
 {

@@ -1,12 +1,13 @@
 import json
 import os
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Any
 
 from dotenv import load_dotenv, find_dotenv
+
+from backend.utils import log_warn
 
 SYSTEM_VERSION = "1.2.0"
 
@@ -106,12 +107,17 @@ def _ensure_config_file(config_path: Path) -> None:
     if config_path.exists():
         return
     if CONFIG_EXAMPLE_PATH.exists():
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(CONFIG_EXAMPLE_PATH, config_path)
-    raise RuntimeError(
-        "config.json が見つかりません。config.example.json をコピーしたので、"
-        "内容を設定してから再起動してください。"
-    )
+        msg = (
+            f"config.json が見つかりません: {config_path}\n"
+            f"  → {CONFIG_EXAMPLE_PATH} をコピーして設定してください。"
+        )
+    else:
+        msg = (
+            f"config.json が見つかりません: {config_path}\n"
+            f"  ※ config.example.json も存在しません。リポジトリから取得してください。"
+        )
+    log_warn(msg)
+    raise RuntimeError(msg)
 
 
 def _load_json_config() -> Dict[str, Any]:
@@ -128,9 +134,12 @@ def _load_json_config() -> Dict[str, Any]:
 
 
 def _set_env_if_absent(key: str, value: str | None) -> None:
-    if value is None or key in os.environ:
+    if value is None:
         return
-    os.environ[key] = value
+    existing = os.environ.get(key)
+    # 既存値がない、または空文字の場合のみ config.json の値を適用
+    if existing is None or existing == "":
+        os.environ[key] = value
 
 
 def _to_env_value(value: Any) -> str | None:

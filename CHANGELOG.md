@@ -7,7 +7,8 @@ System Version: 1.2.0
 - 2026-01-16: 改善: 設定を config.json と .env に分離し、config.json を必須化。
   - `CONFIG_PATH` で config.json の位置を指定可能
   - env → config.json → 既定値の優先順位で読み込み
-  - 未設定時は `config.example.json` をコピーして起動停止
+  - config.json 不在時は案内メッセージを表示して起動停止（自動コピー廃止）
+  - `.env` の空値 `VAR=` を「未設定」として扱い、config.json で補完可能に
 - 2026-01-16: 更新: README と UI の設定ガイドを config.json 前提に整理。
 - 2026-01-16: 追加: `/api/config` でフロント向け設定（ハートビート/履歴/描画バッチ/検索初期値）を返却し、UI側で取得して反映可能に。
 - 2026-01-16: 修正: `/api/health` にキャッシュ無効化ヘッダーを追加。
