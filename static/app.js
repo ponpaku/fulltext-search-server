@@ -186,6 +186,10 @@ const mergeFrontendConfig = (payload) => {
     applyStringConfig(uiConfig.search, 'spaceModeDefault', search.space_mode_default, { allowed: ['none', 'jp', 'all'] });
     applyStringConfig(uiConfig.search, 'normalizeModeDefault', search.normalize_mode_default, { allowed: ['normalized', 'exact'] });
   }
+  // Clamp default to max if default exceeds max
+  if (uiConfig.range.defaultValue > uiConfig.range.max) {
+    uiConfig.range.defaultValue = uiConfig.range.max;
+  }
 };
 
 const loadFrontendConfig = async () => {

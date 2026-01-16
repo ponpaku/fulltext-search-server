@@ -1426,8 +1426,6 @@ def build_frontend_config() -> Dict[str, Dict]:
         ("FRONT_HEARTBEAT_STALE_MULTIPLIER", "stale_multiplier"),
         ("FRONT_HEALTH_CHECK_INTERVAL_MS", "health_check_interval_ms"),
         ("FRONT_HEALTH_CHECK_JITTER_MS", "health_check_jitter_ms"),
-        ("HEARTBEAT_TTL_SEC", "ttl_sec"),
-        ("HEARTBEAT_MAX_CLIENTS", "max_clients"),
     ):
         value = optional_env_int(env_name)
         if value is not None:
@@ -1466,11 +1464,15 @@ def build_frontend_config() -> Dict[str, Dict]:
 
     search: Dict[str, str] = {}
     space_mode = optional_env_str("FRONT_SPACE_MODE_DEFAULT")
-    if space_mode in {"none", "jp", "all"}:
-        search["space_mode_default"] = space_mode
+    if space_mode:
+        space_mode = space_mode.lower()
+        if space_mode in {"none", "jp", "all"}:
+            search["space_mode_default"] = space_mode
     normalize_mode = optional_env_str("FRONT_NORMALIZE_MODE_DEFAULT")
-    if normalize_mode in {"normalized", "exact"}:
-        search["normalize_mode_default"] = normalize_mode
+    if normalize_mode:
+        normalize_mode = normalize_mode.lower()
+        if normalize_mode in {"normalized", "exact"}:
+            search["normalize_mode_default"] = normalize_mode
     if search:
         config["search"] = search
 
