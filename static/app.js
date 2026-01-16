@@ -37,6 +37,7 @@ const state = {
   clientId: null,
   connectionStatus: 'connecting',
   folderLoadState: 'loading',
+  loadFoldersPromise: null,
 };
 
 // DOM Elements
@@ -552,14 +553,15 @@ const renderFolderList = (folders) => {
   }
 
   folderListEl.innerHTML = folders.map(f => {
-    const checked = f.ready ? 'checked' : '';
+    const isSelected = state.selected.has(f.id);
+    const checked = isSelected ? 'checked' : '';
     const disabled = f.ready ? '' : 'disabled';
     const fileCount = f.stats?.total_files ? `${f.stats.total_files} ファイル` : '';
     const safeName = escapeHtml(f.name);
     const safePath = escapeHtml(f.displayPath || f.path);
     
     return `
-      <label class="folder-item ${f.ready && state.selected.has(f.id) ? 'selected' : ''}">
+      <label class="folder-item ${isSelected ? 'selected' : ''}">
         <input type="checkbox" data-id="${f.id}" ${checked} ${disabled}>
         <div class="folder-info">
           <div class="folder-name">${safeName}</div>
@@ -597,40 +599,50 @@ const renderFolderList = (folders) => {
 // ═══════════════════════════════════════════════════════════════
 
 const loadFolders = async () => {
-  folderStatusEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
-  folderListEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
-  refreshBtn.disabled = true;
-  state.folderLoadState = 'loading';
-  renderStatusChips();
-
-  try {
-    const res = await fetch('/api/folders');
-    const data = await res.json();
-    state.folders = data.folders || [];
-    state.selected = new Set(state.folders.filter(f => f.ready).map(f => f.id));
-
-    state.folderLoadState = 'ready';
-    renderStatusChips();
-    renderFolderStatus(state.folders);
-    renderFolderList(state.folders);
-    return true;
-  } catch (err) {
-    folderStatusEl.innerHTML = `
-      <div class="status-item error">
-        <span class="status-dot"></span>
-        <div class="status-info">
-          <span class="status-name">エラー</span>
-          <span class="status-detail">フォルダ情報の取得に失敗しました</span>
-        </div>
-      </div>
-    `;
-    state.folderLoadState = 'error';
-    renderStatusChips();
-    console.error(err);
-    return false;
-  } finally {
-    refreshBtn.disabled = false;
+  // If already loading, return existing promise to avoid parallel loads
+  if (state.loadFoldersPromise) {
+    return state.loadFoldersPromise;
   }
+
+  state.loadFoldersPromise = (async () => {
+    folderStatusEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
+    folderListEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
+    refreshBtn.disabled = true;
+    state.folderLoadState = 'loading';
+    renderStatusChips();
+
+    try {
+      const res = await fetch('/api/folders');
+      const data = await res.json();
+      state.folders = data.folders || [];
+      state.selected = new Set(state.folders.filter(f => f.ready).map(f => f.id));
+
+      state.folderLoadState = 'ready';
+      renderStatusChips();
+      renderFolderStatus(state.folders);
+      renderFolderList(state.folders);
+      return true;
+    } catch (err) {
+      folderStatusEl.innerHTML = `
+        <div class="status-item error">
+          <span class="status-dot"></span>
+          <div class="status-info">
+            <span class="status-name">エラー</span>
+            <span class="status-detail">フォルダ情報の取得に失敗しました</span>
+          </div>
+        </div>
+      `;
+      state.folderLoadState = 'error';
+      renderStatusChips();
+      console.error(err);
+      return false;
+    } finally {
+      refreshBtn.disabled = false;
+      state.loadFoldersPromise = null;
+    }
+  })();
+
+  return state.loadFoldersPromise;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -815,15 +827,28 @@ const formatTimestamp = (timestamp) => {
 const executeHistorySearch = async (item) => {
   closeHistoryModal();
 
+  // Ensure folders are loaded before restoring selection
+  if (!state.folders.length || state.folderLoadState === 'loading') {
+    const loaded = await loadFolders();
+    if (!loaded) {
+      // loadFolders failed; error is already displayed
+      return;
+    }
+  }
+
   // Restore form state
   queryInput.value = item.query;
   setMode(item.mode);
-  rangeInput.value = item.range_limit || 0;
+  // Restore range: 0 for OR mode, otherwise use saved value
+  const rangeValue = item.mode === 'OR' ? 0 : (item.range_limit || 0);
+  rangeInput.value = rangeValue;
   spaceModeSelect.value = item.space_mode || 'jp';
   normalizeModeSelect.value = item.normalize_mode || 'exact';
 
-  // Restore folder selection
-  state.selected = new Set(item.folders);
+  // Restore folder selection (filter out stale IDs)
+  const validIds = new Set(state.folders.map(f => f.id));
+  const validFolders = item.folders.filter(id => validIds.has(id));
+  state.selected = new Set(validFolders);
   renderFolderList(state.folders);
 
   // Execute search
