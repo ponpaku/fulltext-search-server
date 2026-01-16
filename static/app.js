@@ -106,21 +106,43 @@ const getNormalizeLabel = (mode) => ({
   normalized: 'ゆらぎ吸収',
 }[mode] || mode);
 
+const DEFAULT_FRONTEND_CONFIG = {
+  heartbeat: {
+    intervalMs: 35000,
+    jitterMs: 10000,
+    minGapMs: 5000,
+    interactionGapMs: 15000,
+    idleThresholdMs: 90000,
+    failThreshold: 2,
+    staleMultiplier: 2,
+    healthCheckIntervalMs: 5000,
+    healthCheckJitterMs: 3000,
+  },
+  ui: {
+    resultsBatchSize: 100,
+    resultsScrollThresholdPx: 200,
+    historyMaxItems: 30,
+    rangeMax: 5000,
+    rangeDefault: 0,
+    spaceModeDefault: 'jp',
+    normalizeModeDefault: 'normalized',
+  },
+};
+
+const frontendConfig = {
+  heartbeat: { ...DEFAULT_FRONTEND_CONFIG.heartbeat },
+  ui: { ...DEFAULT_FRONTEND_CONFIG.ui },
+};
+
 // ═══════════════════════════════════════════════════════════════
 // HEARTBEAT
 // ═══════════════════════════════════════════════════════════════
 
 const HEARTBEAT_CLIENT_KEY = 'fts_client_id';
-const HEARTBEAT_INTERVAL_MS = 35000;
-const HEARTBEAT_JITTER_MS = 10000;
-const HEARTBEAT_MIN_GAP_MS = 5000;
-const HEARTBEAT_INTERACTION_GAP_MS = 15000;
-const HEARTBEAT_IDLE_THRESHOLD_MS = 90000;
-const HEARTBEAT_FAIL_THRESHOLD = 2;
-const HEARTBEAT_STALE_MULTIPLIER = 2;
-const HEARTBEAT_STALE_MS = HEARTBEAT_INTERVAL_MS * HEARTBEAT_STALE_MULTIPLIER + HEARTBEAT_JITTER_MS;
-const HEALTH_CHECK_INTERVAL_MS = 5000;
-const HEALTH_CHECK_JITTER_MS = 3000;
+const getHeartbeatStaleMs = () => (
+  frontendConfig.heartbeat.intervalMs * frontendConfig.heartbeat.staleMultiplier
+  + frontendConfig.heartbeat.jitterMs
+);
 
 let heartbeatTimer = null;
 let heartbeatInFlight = false;
@@ -161,8 +183,8 @@ const sendHeartbeat = async (reason = 'interval', force = false) => {
   if (!heartbeatEnabled) return;
   if (heartbeatInFlight) return;
   const now = Date.now();
-  if (!force && now - lastHeartbeatAt < HEARTBEAT_MIN_GAP_MS) return;
-  if (!force && lastUserActivityAt && now - lastUserActivityAt > HEARTBEAT_IDLE_THRESHOLD_MS) return;
+  if (!force && now - lastHeartbeatAt < frontendConfig.heartbeat.minGapMs) return;
+  if (!force && lastUserActivityAt && now - lastUserActivityAt > frontendConfig.heartbeat.idleThresholdMs) return;
   heartbeatInFlight = true;
   try {
     const res = await fetch('/api/heartbeat', {
@@ -179,8 +201,8 @@ const sendHeartbeat = async (reason = 'interval', force = false) => {
   } catch (err) {
     console.warn('heartbeat failed', reason, err);
     consecutiveHeartbeatFailures += 1;
-    const stale = lastHeartbeatSuccessAt && now - lastHeartbeatSuccessAt > HEARTBEAT_STALE_MS;
-    if (consecutiveHeartbeatFailures >= HEARTBEAT_FAIL_THRESHOLD || stale) {
+    const stale = lastHeartbeatSuccessAt && now - lastHeartbeatSuccessAt > getHeartbeatStaleMs();
+    if (consecutiveHeartbeatFailures >= frontendConfig.heartbeat.failThreshold || stale) {
       transitionToDisconnected();
     }
   } finally {
@@ -191,19 +213,19 @@ const sendHeartbeat = async (reason = 'interval', force = false) => {
 
 const scheduleHeartbeat = () => {
   if (!heartbeatEnabled) return;
-  const jitter = Math.floor(Math.random() * HEARTBEAT_JITTER_MS);
+  const jitter = Math.floor(Math.random() * frontendConfig.heartbeat.jitterMs);
   clearTimeout(heartbeatTimer);
   heartbeatTimer = setTimeout(async () => {
     await sendHeartbeat('interval');
     scheduleHeartbeat();
-  }, HEARTBEAT_INTERVAL_MS + jitter);
+  }, frontendConfig.heartbeat.intervalMs + jitter);
 };
 
 const handleHeartbeatInteraction = () => {
   if (!heartbeatEnabled) return;
   const now = Date.now();
   lastUserActivityAt = now;
-  if (now - lastInteractionHeartbeatAt < HEARTBEAT_INTERACTION_GAP_MS) return;
+  if (now - lastInteractionHeartbeatAt < frontendConfig.heartbeat.interactionGapMs) return;
   lastInteractionHeartbeatAt = now;
   sendHeartbeat('interaction', true);
 };
@@ -228,14 +250,14 @@ const stopHealthPolling = () => {
 
 const scheduleHealthCheck = () => {
   if (!healthPollingEnabled) return;
-  const jitter = Math.floor(Math.random() * HEALTH_CHECK_JITTER_MS);
+  const jitter = Math.floor(Math.random() * frontendConfig.heartbeat.healthCheckJitterMs);
   clearTimeout(healthTimer);
   healthTimer = setTimeout(async () => {
     if (!healthPollingEnabled) return;
     await checkHealth();
     if (!healthPollingEnabled) return;
     scheduleHealthCheck();
-  }, HEALTH_CHECK_INTERVAL_MS + jitter);
+  }, frontendConfig.heartbeat.healthCheckIntervalMs + jitter);
 };
 
 const startHealthPolling = () => {
@@ -300,6 +322,91 @@ const initHeartbeat = () => {
   ['click', 'keydown', 'pointerdown', 'touchstart'].forEach((eventName) => {
     document.addEventListener(eventName, handleHeartbeatInteraction);
   });
+};
+
+const applyNumericOverride = (target, key, value, minValue) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return;
+  if (value < minValue) return;
+  target[key] = value;
+};
+
+const syncFrontendUiDefaults = () => {
+  if (rangeInput) {
+    const maxValue = frontendConfig.ui.rangeMax;
+    const safeDefault = Math.min(frontendConfig.ui.rangeDefault, maxValue);
+    rangeInput.max = String(maxValue);
+    const current = Number.parseInt(rangeInput.value || '', 10);
+    if (!Number.isFinite(current) || current < 0 || current > maxValue) {
+      rangeInput.value = String(safeDefault);
+    }
+  }
+  if (spaceModeSelect) {
+    const value = frontendConfig.ui.spaceModeDefault;
+    if (spaceModeSelect.querySelector(`option[value="${value}"]`)) {
+      spaceModeSelect.value = value;
+    }
+  }
+  if (normalizeModeSelect) {
+    const value = frontendConfig.ui.normalizeModeDefault;
+    if (normalizeModeSelect.querySelector(`option[value="${value}"]`)) {
+      normalizeModeSelect.value = value;
+    }
+  }
+};
+
+const applyFrontendConfig = (config) => {
+  if (!config || typeof config !== 'object') {
+    syncFrontendUiDefaults();
+    return;
+  }
+  const heartbeat = config.heartbeat || {};
+  applyNumericOverride(frontendConfig.heartbeat, 'intervalMs', heartbeat.interval_ms, 1000);
+  applyNumericOverride(frontendConfig.heartbeat, 'jitterMs', heartbeat.jitter_ms, 0);
+  applyNumericOverride(frontendConfig.heartbeat, 'minGapMs', heartbeat.min_gap_ms, 0);
+  applyNumericOverride(frontendConfig.heartbeat, 'interactionGapMs', heartbeat.interaction_gap_ms, 0);
+  applyNumericOverride(frontendConfig.heartbeat, 'idleThresholdMs', heartbeat.idle_threshold_ms, 0);
+  applyNumericOverride(frontendConfig.heartbeat, 'failThreshold', heartbeat.fail_threshold, 1);
+  applyNumericOverride(frontendConfig.heartbeat, 'staleMultiplier', heartbeat.stale_multiplier, 1);
+  applyNumericOverride(frontendConfig.heartbeat, 'healthCheckIntervalMs', heartbeat.health_check_interval_ms, 1000);
+  applyNumericOverride(frontendConfig.heartbeat, 'healthCheckJitterMs', heartbeat.health_check_jitter_ms, 0);
+
+  const ui = config.ui || {};
+  applyNumericOverride(frontendConfig.ui, 'resultsBatchSize', ui.results_batch_size, 1);
+  applyNumericOverride(frontendConfig.ui, 'resultsScrollThresholdPx', ui.results_scroll_threshold_px, 0);
+  applyNumericOverride(frontendConfig.ui, 'historyMaxItems', ui.history_max_items, 1);
+  applyNumericOverride(frontendConfig.ui, 'rangeMax', ui.range_max, 0);
+  applyNumericOverride(frontendConfig.ui, 'rangeDefault', ui.range_default, 0);
+
+  if (typeof ui.space_mode_default === 'string') {
+    const value = ui.space_mode_default.toLowerCase();
+    if (['none', 'jp', 'all'].includes(value)) {
+      frontendConfig.ui.spaceModeDefault = value;
+    }
+  }
+  if (typeof ui.normalize_mode_default === 'string') {
+    const value = ui.normalize_mode_default.toLowerCase();
+    if (['normalized', 'exact'].includes(value)) {
+      frontendConfig.ui.normalizeModeDefault = value;
+    }
+  }
+
+  if (frontendConfig.ui.rangeDefault > frontendConfig.ui.rangeMax) {
+    frontendConfig.ui.rangeDefault = frontendConfig.ui.rangeMax;
+  }
+
+  syncFrontendUiDefaults();
+};
+
+const loadFrontendConfig = async () => {
+  try {
+    const res = await fetch('/api/config', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`config fetch failed: ${res.status}`);
+    const data = await res.json();
+    applyFrontendConfig(data);
+  } catch (err) {
+    console.warn('Failed to load frontend config', err);
+    applyFrontendConfig(null);
+  }
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -380,7 +487,6 @@ const toggleTheme = () => {
 // ═══════════════════════════════════════════════════════════════
 
 const HISTORY_STORAGE_KEY = 'searchQueryHistory';
-const HISTORY_MAX_ITEMS = 30;
 
 const loadQueryHistory = () => {
   try {
@@ -436,7 +542,9 @@ const addToQueryHistory = (query, mode, range, spaceMode, normalizeMode, folders
 
   // Keep only max items (excluding pinned)
   const pinned = state.queryHistory.filter(item => item.pinned);
-  const unpinned = state.queryHistory.filter(item => !item.pinned).slice(0, HISTORY_MAX_ITEMS);
+  const unpinned = state.queryHistory
+    .filter(item => !item.pinned)
+    .slice(0, frontendConfig.ui.historyMaxItems);
   state.queryHistory = [...pinned, ...unpinned];
 
   saveQueryHistory();
@@ -1317,7 +1425,7 @@ const appendNextBatch = () => {
   if (state.renderedCount >= list.length) return;
   state.isRenderingBatch = true;
   const start = state.renderedCount;
-  const end = Math.min(start + 100, list.length);
+  const end = Math.min(start + frontendConfig.ui.resultsBatchSize, list.length);
   const slice = list.slice(start, end);
   const listEl = resultsEl.querySelector('.results-list');
   const html = state.viewMode === 'file'
@@ -1333,7 +1441,10 @@ const appendNextBatch = () => {
 
 const handleResultsScroll = () => {
   if (!state.results.length || state.isRenderingBatch) return;
-  if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 200) {
+  if (
+    resultsEl.scrollTop + resultsEl.clientHeight
+    >= resultsEl.scrollHeight - frontendConfig.ui.resultsScrollThresholdPx
+  ) {
     appendNextBatch();
   }
 };
@@ -1790,9 +1901,15 @@ if (clearFilterBtn) {
 window.addEventListener('DOMContentLoaded', () => {
   initTheme();
   loadQueryHistory();
-  initHeartbeat();
-  setMode('AND');
-  loadFolders();
-  queryInput.focus();
-  updateFolderToggleLabel();
+  const startApp = async () => {
+    await loadFrontendConfig();
+    initHeartbeat();
+    setMode('AND');
+    loadFolders();
+    queryInput.focus();
+    updateFolderToggleLabel();
+  };
+  startApp().catch((err) => {
+    console.error('初期化に失敗しました', err);
+  });
 });

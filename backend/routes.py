@@ -1408,6 +1408,74 @@ def heartbeat_max_clients() -> int:
     return max(1, total_worker_budget())
 
 
+def _env_int_optional(name: str, min_value: int | None = None) -> int | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if min_value is not None and value < min_value:
+        return None
+    return value
+
+
+def _env_choice_optional(name: str, choices: set[str]) -> str | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    value = raw.lower()
+    if value in choices:
+        return value
+    return None
+
+
+def build_frontend_config() -> Dict[str, Dict]:
+    heartbeat: Dict[str, int] = {}
+    ui: Dict[str, int | str] = {}
+
+    for key, env_name, min_value in (
+        ("interval_ms", "FRONT_HEARTBEAT_INTERVAL_MS", 1000),
+        ("jitter_ms", "FRONT_HEARTBEAT_JITTER_MS", 0),
+        ("min_gap_ms", "FRONT_HEARTBEAT_MIN_GAP_MS", 0),
+        ("interaction_gap_ms", "FRONT_HEARTBEAT_INTERACTION_GAP_MS", 0),
+        ("idle_threshold_ms", "FRONT_HEARTBEAT_IDLE_THRESHOLD_MS", 0),
+        ("fail_threshold", "FRONT_HEARTBEAT_FAIL_THRESHOLD", 1),
+        ("stale_multiplier", "FRONT_HEARTBEAT_STALE_MULTIPLIER", 1),
+        ("health_check_interval_ms", "FRONT_HEALTH_CHECK_INTERVAL_MS", 1000),
+        ("health_check_jitter_ms", "FRONT_HEALTH_CHECK_JITTER_MS", 0),
+    ):
+        value = _env_int_optional(env_name, min_value)
+        if value is not None:
+            heartbeat[key] = value
+
+    for key, env_name, min_value in (
+        ("results_batch_size", "FRONT_RESULTS_BATCH_SIZE", 1),
+        ("results_scroll_threshold_px", "FRONT_RESULTS_SCROLL_THRESHOLD_PX", 0),
+        ("history_max_items", "FRONT_HISTORY_MAX_ITEMS", 1),
+        ("range_max", "FRONT_RANGE_MAX", 0),
+        ("range_default", "FRONT_RANGE_DEFAULT", 0),
+    ):
+        value = _env_int_optional(env_name, min_value)
+        if value is not None:
+            ui[key] = value
+
+    space_mode_default = _env_choice_optional(
+        "FRONT_SPACE_MODE_DEFAULT", {"none", "jp", "all"}
+    )
+    if space_mode_default:
+        ui["space_mode_default"] = space_mode_default
+
+    normalize_mode_default = _env_choice_optional(
+        "FRONT_NORMALIZE_MODE_DEFAULT", {"normalized", "exact"}
+    )
+    if normalize_mode_default:
+        ui["normalize_mode_default"] = normalize_mode_default
+
+    return {"heartbeat": heartbeat, "ui": ui}
+
+
 def _prune_active_clients_locked(now: float, ttl_sec: int) -> None:
     expired = [cid for cid, last_seen in active_client_heartbeats.items() if now - last_seen > ttl_sec]
     for cid in expired:
@@ -1697,6 +1765,12 @@ async def read_root():
     if not index_file.exists():
         raise HTTPException(status_code=404, detail="UIが見つかりません")
     return FileResponse(index_file)
+
+
+@app.get("/api/config")
+async def get_frontend_config():
+    config = build_frontend_config()
+    return JSONResponse({"schema_version": 1, **config})
 
 
 @app.get("/api/folders")
