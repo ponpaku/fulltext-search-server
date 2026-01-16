@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import csv
 import gzip
 import hashlib
@@ -402,6 +403,10 @@ def build_process_shared_store() -> List[Dict]:
 
 
 # --- リクエストモデル ---
+DEFAULT_SEARCH_PAGE_SIZE = 100
+MAX_SEARCH_PAGE_SIZE = 1000
+
+
 class SearchRequest(BaseModel):
     query: str = Field(..., description="検索キーワード（空白区切り）")
     mode: str = Field("AND", pattern="^(AND|OR)$")
@@ -409,6 +414,10 @@ class SearchRequest(BaseModel):
     space_mode: str = Field("jp", pattern="^(none|jp|all)$")
     normalize_mode: str | None = Field(None)
     folders: List[str]
+    limit: int | None = Field(None, ge=1, le=MAX_SEARCH_PAGE_SIZE)
+    cursor: str | None = Field(None)
+    include_total: bool = Field(True)
+    return_all: bool = Field(False)
 
     @field_validator("query")
     def validate_query(cls, v: str) -> str:
@@ -1091,6 +1100,58 @@ def apply_folder_order(payload: Dict, order_map: Dict[str, int]) -> Dict:
     fallback = len(order_map) + 1
     results.sort(key=lambda r: order_map.get(r.get("folderId"), fallback))
     return payload
+
+
+def encode_cursor_token(cache_key: str, offset: int, index_uuid: str) -> str:
+    payload = {"cache_key": cache_key, "offset": offset, "index_uuid": index_uuid}
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_cursor_token(token: str) -> Dict:
+    padded = token + "=" * (-len(token) % 4)
+    raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("invalid cursor payload")
+    return data
+
+
+def build_paged_payload(
+    payload: Dict,
+    offset: int,
+    limit: int | None,
+    include_total: bool,
+    return_all: bool,
+    cache_key: str,
+    index_uuid: str,
+) -> Dict:
+    results = payload.get("results", [])
+    total_count = payload.get("count", len(results)) if isinstance(results, list) else 0
+    if return_all or limit is None:
+        items = results
+    else:
+        items = results[offset : offset + limit]
+
+    response_payload = dict(payload)
+    response_payload["results"] = items
+    response_payload["returned"] = len(items) if isinstance(items, list) else 0
+
+    if include_total:
+        response_payload["count"] = total_count
+    else:
+        response_payload.pop("count", None)
+
+    if return_all or limit is None:
+        response_payload["next_cursor"] = None
+    else:
+        next_offset = offset + limit
+        response_payload["next_cursor"] = (
+            encode_cursor_token(cache_key, next_offset, index_uuid)
+            if next_offset < total_count
+            else None
+        )
+    return response_payload
 
 
 def load_fixed_cache_index() -> Dict[str, Dict]:
@@ -1787,26 +1848,28 @@ def _try_get_memory_cache(
     target_ids: List[str],
     req_query: str,
     params: "SearchParams",
+    update_stats: bool = True,
 ) -> Dict | None:
     """メモリキャッシュから結果を取得。ヒットした場合は統計を更新して返す。"""
     with cache_lock:
         cached_payload = memory_cache.get(cache_key) if memory_cache else None
     if cached_payload and payload_matches_folders(cached_payload, target_ids):
         cached_payload = apply_folder_order(cached_payload, folder_order)
-        cached_bytes = estimate_payload_bytes(cached_payload)
-        cached_kb = cached_bytes / 1024
-        update_query_stats(
-            query_stats,
-            cache_key,
-            req_query,
-            params,
-            target_ids,
-            cached_payload.get("count", 0),
-            cached_kb,
-            None,
-            True,
-        )
-        maybe_flush_query_stats()
+        if update_stats:
+            cached_bytes = estimate_payload_bytes(cached_payload)
+            cached_kb = cached_bytes / 1024
+            update_query_stats(
+                query_stats,
+                cache_key,
+                req_query,
+                params,
+                target_ids,
+                cached_payload.get("count", 0),
+                cached_kb,
+                None,
+                True,
+            )
+            maybe_flush_query_stats()
         return cached_payload
     elif cached_payload:
         with cache_lock:
@@ -1820,6 +1883,7 @@ def _try_get_fixed_cache(
     target_ids: List[str],
     req_query: str,
     params: "SearchParams",
+    update_stats: bool = True,
 ) -> Dict | None:
     """固定キャッシュから結果を取得。ヒットした場合はメモリキャッシュにも保存して返す。"""
     with cache_lock:
@@ -1863,23 +1927,25 @@ def _try_get_fixed_cache(
         cached_kb = fixed_entry.get("payload_kb")
         if cached_kb is None:
             cached_kb = estimate_payload_bytes(payload) / 1024
-        update_query_stats(
-            query_stats,
-            cache_key,
-            req_query,
-            params,
-            target_ids,
-            payload.get("count", 0),
-            cached_kb,
-            None,
-            True,
-        )
+        if update_stats:
+            update_query_stats(
+                query_stats,
+                cache_key,
+                req_query,
+                params,
+                target_ids,
+                payload.get("count", 0),
+                cached_kb,
+                None,
+                True,
+            )
         with cache_lock:
             if memory_cache:
                 memory_cache.set(cache_key, payload, int(cached_kb * 1024))
             touch_fixed_cache_entry(cache_key)
         maybe_flush_fixed_cache_index()
-        maybe_flush_query_stats()
+        if update_stats:
+            maybe_flush_query_stats()
         return payload
     with cache_lock:
         fixed_cache_index.pop(cache_key, None)
@@ -1907,13 +1973,89 @@ async def search(req: SearchRequest):
             cache_key = cache_key_for(req.query, params, target_ids)
             mark_search_activity()
 
+            current_gen_name = get_current_generation_pointer()
+            index_uuid = current_gen_name or "unknown"
+            use_paging = req.limit is not None or req.cursor is not None
+            return_all = req.return_all or not use_paging
+            include_total = req.include_total or return_all
+            limit = req.limit if req.limit is not None else DEFAULT_SEARCH_PAGE_SIZE
+            offset = 0
+
+            if req.cursor:
+                try:
+                    cursor_data = decode_cursor_token(req.cursor)
+                    cursor_key = cursor_data.get("cache_key")
+                    cursor_uuid = cursor_data.get("index_uuid")
+                    cursor_offset = int(cursor_data.get("offset", 0))
+                    if cursor_key != cache_key:
+                        raise HTTPException(status_code=400, detail="カーソルが検索条件と一致しません")
+                    if cursor_uuid != index_uuid:
+                        raise HTTPException(status_code=409, detail="インデックス更新のため再検索してください")
+                    if cursor_offset < 0:
+                        raise ValueError("negative offset")
+                    offset = cursor_offset
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail="カーソルが不正です") from exc
+
+            if return_all:
+                limit = None
+                offset = 0
+
             # キャッシュからの取得を試行
-            cached_result = _try_get_memory_cache(cache_key, target_ids, req.query, params)
+            cached_result = _try_get_memory_cache(cache_key, target_ids, req.query, params, update_stats=False)
             if cached_result:
-                return cached_result
-            cached_result = _try_get_fixed_cache(cache_key, target_ids, req.query, params)
+                total_hits = cached_result.get("count", 0)
+                response_payload = build_paged_payload(
+                    cached_result,
+                    offset,
+                    limit,
+                    include_total,
+                    return_all,
+                    cache_key,
+                    index_uuid,
+                )
+                response_kb = estimate_payload_bytes(response_payload) / 1024
+                update_query_stats(
+                    query_stats,
+                    cache_key,
+                    req.query,
+                    params,
+                    target_ids,
+                    total_hits,
+                    response_kb,
+                    None,
+                    True,
+                )
+                maybe_flush_query_stats()
+                return response_payload
+            cached_result = _try_get_fixed_cache(cache_key, target_ids, req.query, params, update_stats=False)
             if cached_result:
-                return cached_result
+                total_hits = cached_result.get("count", 0)
+                response_payload = build_paged_payload(
+                    cached_result,
+                    offset,
+                    limit,
+                    include_total,
+                    return_all,
+                    cache_key,
+                    index_uuid,
+                )
+                response_kb = estimate_payload_bytes(response_payload) / 1024
+                update_query_stats(
+                    query_stats,
+                    cache_key,
+                    req.query,
+                    params,
+                    target_ids,
+                    total_hits,
+                    response_kb,
+                    None,
+                    True,
+                )
+                maybe_flush_query_stats()
+                return response_payload
 
             keywords, norm_keyword_groups = build_query_groups(
                 req.query,
@@ -1961,9 +2103,6 @@ async def search(req: SearchRequest):
         )
 
         # Get current index UUID
-        current_gen_name = get_current_generation_pointer()
-        index_uuid = current_gen_name or "unknown"
-
         payload = {
             "count": len(results),
             "results": results,
@@ -1974,7 +2113,16 @@ async def search(req: SearchRequest):
         }
         payload = apply_folder_order(payload, folder_order)
         payload_bytes = estimate_payload_bytes(payload)
-        payload_kb = payload_bytes / 1024
+        response_payload = build_paged_payload(
+            payload,
+            offset,
+            limit,
+            include_total,
+            return_all,
+            cache_key,
+            index_uuid,
+        )
+        response_kb = estimate_payload_bytes(response_payload) / 1024
         update_query_stats(
             query_stats,
             cache_key,
@@ -1982,7 +2130,7 @@ async def search(req: SearchRequest):
             params,
             target_ids,
             len(results),
-            payload_kb,
+            response_kb,
             elapsed * 1000,
             False,
         )
@@ -1995,7 +2143,7 @@ async def search(req: SearchRequest):
             trigger_fixed_cache_rebuild(loop, "クエリ条件到達")
 
         # UI側でハイライトしやすいように検索キーワードも返す
-        return payload
+        return response_payload
 
 
 @app.post("/api/export")
