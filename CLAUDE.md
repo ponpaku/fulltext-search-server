@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-System Version: 1.2.0
+System Version: 1.3.0
 
 ## 1. Project Context
 - ローカル/社内フォルダの PDF/Office 文書を全文検索する FastAPI アプリ（UI は `static/` の静的配信）。
