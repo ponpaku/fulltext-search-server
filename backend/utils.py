@@ -71,6 +71,15 @@ def env_int(name: str, default: int) -> int:
     return default
 
 
+def env_int_optional(name: str) -> int | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    return None
+
+
 def env_float(name: str, default: float) -> float:
     raw = os.getenv(name, "").strip()
     try:

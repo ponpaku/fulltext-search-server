@@ -90,6 +90,7 @@ from .utils import (
     env_bool,
     env_float,
     env_int,
+    env_int_optional,
     file_id_from_path,
     folder_id_from_path,
     get_ipv4_addresses,
@@ -1691,6 +1692,45 @@ def per_request_workers() -> int:
     return workers
 
 
+def build_frontend_config() -> Dict[str, Dict]:
+    space_mode = os.getenv("FRONTEND_SPACE_MODE_DEFAULT", "").strip().lower()
+    if space_mode not in {"none", "jp", "all"}:
+        space_mode = ""
+    normalize_mode = os.getenv("FRONTEND_NORMALIZE_MODE_DEFAULT", "").strip().lower()
+    if normalize_mode not in {"normalized", "exact"}:
+        normalize_mode = ""
+    return {
+        "heartbeat": {
+            "interval_ms": env_int_optional("FRONTEND_HEARTBEAT_INTERVAL_MS"),
+            "jitter_ms": env_int_optional("FRONTEND_HEARTBEAT_JITTER_MS"),
+            "min_gap_ms": env_int_optional("FRONTEND_HEARTBEAT_MIN_GAP_MS"),
+            "interaction_gap_ms": env_int_optional("FRONTEND_HEARTBEAT_INTERACTION_GAP_MS"),
+            "idle_threshold_ms": env_int_optional("FRONTEND_HEARTBEAT_IDLE_THRESHOLD_MS"),
+            "fail_threshold": env_int_optional("FRONTEND_HEARTBEAT_FAIL_THRESHOLD"),
+            "stale_multiplier": env_int_optional("FRONTEND_HEARTBEAT_STALE_MULTIPLIER"),
+        },
+        "health": {
+            "interval_ms": env_int_optional("FRONTEND_HEALTH_CHECK_INTERVAL_MS"),
+            "jitter_ms": env_int_optional("FRONTEND_HEALTH_CHECK_JITTER_MS"),
+        },
+        "render": {
+            "batch_size": env_int_optional("FRONTEND_RENDER_BATCH_SIZE"),
+            "scroll_threshold_px": env_int_optional("FRONTEND_RENDER_SCROLL_THRESHOLD_PX"),
+        },
+        "history": {
+            "max_items": env_int_optional("FRONTEND_HISTORY_MAX_ITEMS"),
+        },
+        "search": {
+            "range": {
+                "max": env_int_optional("FRONTEND_RANGE_MAX"),
+                "default": env_int_optional("FRONTEND_RANGE_DEFAULT"),
+            },
+            "space_mode_default": space_mode or None,
+            "normalize_mode_default": normalize_mode or None,
+        },
+    }
+
+
 @app.get("/", response_class=FileResponse)
 async def read_root():
     index_file = STATIC_DIR / "index.html"
@@ -1702,6 +1742,11 @@ async def read_root():
 @app.get("/api/folders")
 async def get_folders():
     return JSONResponse({"folders": describe_folder_state()})
+
+
+@app.get("/api/config")
+async def get_frontend_config():
+    return JSONResponse(build_frontend_config())
 
 
 @app.post("/api/heartbeat")
