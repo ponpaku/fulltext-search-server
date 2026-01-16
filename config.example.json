@@ -1,0 +1,63 @@
+{
+  "search": {
+    "folders": [
+      {"label": "規程", "path": "C:\\path\\to\\folder1"},
+      {"label": "議事録", "path": "//192.168.0.10/share/folder2"}
+    ],
+    "folder_aliases": {
+      "192.168.0.10": "share"
+    },
+    "execution_mode": "thread",
+    "process_shared": true,
+    "cpu_budget": 6,
+    "concurrency": 6,
+    "workers": 6
+  },
+  "front": {
+    "results_batch_size": 100,
+    "scroll_threshold_px": 200,
+    "history_max_items": 30,
+    "range_max": 5000,
+    "range_default": 0,
+    "space_mode_default": "jp",
+    "normalize_mode_default": "normalized"
+  },
+  "query": {
+    "normalize": "nfkc_casefold"
+  },
+  "query_stats": {
+    "ttl_days": 30,
+    "flush_sec": 60
+  },
+  "cache": {
+    "fixed_min_count": 10,
+    "fixed_min_time_ms": 500,
+    "fixed_min_hits": 5000,
+    "fixed_min_kb": 2000,
+    "fixed_ttl_days": 7,
+    "fixed_max_entries": 20,
+    "fixed_trigger_cooldown_sec": 300,
+    "mem_max_mb": 200,
+    "mem_max_entries": 200,
+    "mem_max_result_kb": 2000,
+    "compress_min_kb": 2000
+  },
+  "rebuild": {
+    "schedule": "03:00",
+    "allow_shrink": false
+  },
+  "index": {
+    "keep_generations": 3,
+    "keep_days": 0,
+    "max_bytes": 0,
+    "cleanup_grace_sec": 300,
+    "store_normalized": true
+  },
+  "diff": {
+    "mode": "stat",
+    "fast_fp_bytes": 65536,
+    "full_hash_algo": "sha256",
+    "full_hash_paths": [],
+    "full_hash_exts": []
+  }
+}

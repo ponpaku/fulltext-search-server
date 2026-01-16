@@ -56,93 +56,32 @@ chmod +x run.sh
   - 引数の追加: `/k ""C:\path\to\run.bat""`
   - 開始（オプション）: `C:\path\to\`（run.bat のフォルダ）
 
-## 設定（.env）
+## 設定（config.json / .env）
+### config.json
+- `config.example.json` を `config.json` にコピーして編集してください。
+- 起動時に `config.json` が無い場合は `config.example.json` をコピーして起動を停止します。
+- 既定の配置場所はリポジトリ直下ですが、`CONFIG_PATH` で変更できます。
+- 設定の優先順位は「OS環境変数/.env → config.json → 既定値」です。
+  - 検索対象やチューニング系の値は config.json を中心に管理します。
+
+詳細な項目は `config.example.json` を参照してください。
+
+### .env（運用/秘密情報・一時切替）
 ```env
-# 検索対象フォルダ（ラベル=パス、1行で指定）
-# Windowsは C:\Users\... をそのまま記載可（\ のエスケープ不要）
-SEARCH_FOLDERS="規程=C:\data\docs,議事録=//192.168.30.10/share/minutes"
-# 複数行に分割する設定は非対応（最初の1行のみ読み取り）
-# OS環境変数が設定済みの場合はそちらが優先されます
+# 設定ファイルの場所（省略時は ./config.json）
+CONFIG_PATH="config.json"
 
-# NAS名表示用（表示のみ）
-SEARCH_FOLDER_ALIASES="192.168.30.10=landisk-fukyo"
-
-# 検索同時実行数（デフォルト: CPU数）
-SEARCH_CONCURRENCY=6
-
-# 1検索あたりの並列ワーカー数（省略時は自動計算）
-SEARCH_WORKERS=6
-
-# CPUコア数の上書き（開発機と本番機が違う場合）
-SEARCH_CPU_BUDGET=6
-
-# ハートビートのTTL（アクティブ判定、秒）
-HEARTBEAT_TTL_SEC=90
-
-# アクティブクライアント数の上限（未指定ならワーカー予算に準拠）
-HEARTBEAT_MAX_CLIENTS=6
-
-# フロント向け設定（/api/config で返却、未指定ならUIデフォルト）
-FRONT_HEARTBEAT_INTERVAL_MS=35000
-FRONT_HEARTBEAT_JITTER_MS=10000
-FRONT_HEARTBEAT_MIN_GAP_MS=5000
-FRONT_HEARTBEAT_INTERACTION_GAP_MS=15000
-FRONT_HEARTBEAT_IDLE_THRESHOLD_MS=90000
-FRONT_HEARTBEAT_FAIL_THRESHOLD=2
-FRONT_HEARTBEAT_STALE_MULTIPLIER=2
-FRONT_HEALTH_CHECK_INTERVAL_MS=5000
-FRONT_HEALTH_CHECK_JITTER_MS=3000
-FRONT_RESULTS_BATCH_SIZE=100
-FRONT_RESULTS_SCROLL_THRESHOLD_PX=200
-FRONT_HISTORY_MAX_ITEMS=30
-FRONT_RANGE_MAX=5000
-FRONT_RANGE_DEFAULT=0
-FRONT_SPACE_MODE_DEFAULT=jp
-FRONT_NORMALIZE_MODE_DEFAULT=normalized
-
-# 検索実行モード（thread/process）
-SEARCH_EXECUTION_MODE=thread
+# 起動ポート（デフォルト: 80）
+# PORT=80
 
 # SSL 証明書ディレクトリ（lan-cert.pem / lan-key.pem）
-CERT_DIR="certs"
+# CERT_DIR="certs"
 
-# クエリ統計の保持期間（日）
-QUERY_STATS_TTL_DAYS=30
+# デバッグログ（0/1）
+# SEARCH_DEBUG=1
 
-# クエリ統計の保存間隔（秒）
-QUERY_STATS_FLUSH_SEC=60
-
-# 固定キャッシュの条件（頻度・重さ）
-CACHE_FIXED_MIN_COUNT=10
-CACHE_FIXED_MIN_TIME_MS=500
-CACHE_FIXED_MIN_HITS=5000
-CACHE_FIXED_MIN_KB=2000
-
-# 固定キャッシュの維持期間（日）
-CACHE_FIXED_TTL_DAYS=7
-
-# 固定キャッシュの最大件数
-CACHE_FIXED_MAX_ENTRIES=20
-
-# 固定キャッシュの自動再構築の間隔（秒）
-CACHE_FIXED_TRIGGER_COOLDOWN_SEC=300
-
-# メモリキャッシュの上限
-CACHE_MEM_MAX_MB=200
-CACHE_MEM_MAX_ENTRIES=200
-CACHE_MEM_MAX_RESULT_KB=2000
-
-# 固定キャッシュの圧縮閾値（KB以上はgzip保存）
-CACHE_COMPRESS_MIN_KB=2000
-
-# クエリ正規化モード（off/nfkc_casefold） ※推奨: nfkc_casefold
-QUERY_NORMALIZE=nfkc_casefold
-
-# インデックスに正規化済みテキストを保持（0/1） ※推奨: 1
-INDEX_STORE_NORMALIZED=1
-
-# インデックス再構築スケジュール（例: 03:00 or 12h）
-REBUILD_SCHEDULE="03:00"
+# 運用中の一時切替（thread/process）
+# SEARCH_EXECUTION_MODE=thread
 ```
 
 ## インデックス

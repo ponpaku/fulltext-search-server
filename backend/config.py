@@ -1,5 +1,7 @@
+import json
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
@@ -45,6 +47,8 @@ DEFAULT_CACHE_MAX_RESULT_KB = 2000
 DEFAULT_HEARTBEAT_TTL_SEC = 90
 
 STATIC_DIR = BASE_DIR / "static"
+CONFIG_DEFAULT_FILENAME = "config.json"
+CONFIG_EXAMPLE_FILENAME = "config.example.json"
 
 
 @dataclass
@@ -89,6 +93,151 @@ def load_env() -> None:
     load_dotenv()
     if not had_search_folders and raw_search_folders is not None:
         os.environ["SEARCH_FOLDERS"] = raw_search_folders
+
+
+def resolve_config_path() -> Path:
+    raw_path = os.getenv("CONFIG_PATH", "").strip()
+    candidate = raw_path or CONFIG_DEFAULT_FILENAME
+    path = Path(candidate)
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
+
+
+def load_json_config() -> Dict:
+    config_path = resolve_config_path()
+    if not config_path.exists():
+        example_path = PROJECT_ROOT / CONFIG_EXAMPLE_FILENAME
+        if example_path.exists():
+            try:
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(example_path, config_path)
+            except OSError:
+                pass
+        raise RuntimeError(
+            "config.json が見つかりません。"
+            f" {config_path} を作成しましたので内容を編集して再起動してください。"
+        )
+    try:
+        with open(config_path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"config.json の読み込みに失敗しました: {exc}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"config.json の読み込みに失敗しました: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("config.json はオブジェクト形式で指定してください。")
+    return data
+
+
+def set_env_if_missing(name: str, value: object | None) -> None:
+    if value is None:
+        return
+    if os.getenv(name, "").strip():
+        return
+    if isinstance(value, bool):
+        os.environ[name] = "1" if value else "0"
+        return
+    os.environ[name] = str(value)
+
+
+def encode_search_folders(items: object) -> str | None:
+    if not items:
+        return None
+    if not isinstance(items, list):
+        return None
+    parts: List[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            path = str(item.get("path", "")).strip()
+            if not path:
+                continue
+            label = str(item.get("label", "")).strip()
+            parts.append(f"{label}={path}" if label else path)
+        elif isinstance(item, str):
+            candidate = item.strip()
+            if candidate:
+                parts.append(candidate)
+    return ";".join(parts) if parts else None
+
+
+def encode_aliases(aliases: object) -> str | None:
+    if not aliases or not isinstance(aliases, dict):
+        return None
+    parts: List[str] = []
+    for key, value in aliases.items():
+        key_str = str(key).strip()
+        value_str = str(value).strip()
+        if key_str and value_str:
+            parts.append(f"{key_str}={value_str}")
+    return ";".join(parts) if parts else None
+
+
+def encode_csv_list(values: object) -> str | None:
+    if not values:
+        return None
+    if isinstance(values, list):
+        parts = [str(item).strip() for item in values if str(item).strip()]
+        return ",".join(parts) if parts else None
+    return str(values).strip() if str(values).strip() else None
+
+
+def apply_config_to_env(config: Dict) -> None:
+    search = config.get("search", {}) if isinstance(config, dict) else {}
+    set_env_if_missing("SEARCH_FOLDERS", encode_search_folders(search.get("folders")))
+    set_env_if_missing("SEARCH_FOLDER_ALIASES", encode_aliases(search.get("folder_aliases")))
+    set_env_if_missing("SEARCH_EXECUTION_MODE", search.get("execution_mode"))
+    set_env_if_missing("SEARCH_PROCESS_SHARED", search.get("process_shared"))
+    set_env_if_missing("SEARCH_CPU_BUDGET", search.get("cpu_budget"))
+    set_env_if_missing("SEARCH_CONCURRENCY", search.get("concurrency"))
+    set_env_if_missing("SEARCH_WORKERS", search.get("workers"))
+
+    front = config.get("front", {}) if isinstance(config, dict) else {}
+    set_env_if_missing("FRONT_RESULTS_BATCH_SIZE", front.get("results_batch_size"))
+    set_env_if_missing("FRONT_RESULTS_SCROLL_THRESHOLD_PX", front.get("scroll_threshold_px"))
+    set_env_if_missing("FRONT_HISTORY_MAX_ITEMS", front.get("history_max_items"))
+    set_env_if_missing("FRONT_RANGE_MAX", front.get("range_max"))
+    set_env_if_missing("FRONT_RANGE_DEFAULT", front.get("range_default"))
+    set_env_if_missing("FRONT_SPACE_MODE_DEFAULT", front.get("space_mode_default"))
+    set_env_if_missing("FRONT_NORMALIZE_MODE_DEFAULT", front.get("normalize_mode_default"))
+
+    query = config.get("query", {}) if isinstance(config, dict) else {}
+    set_env_if_missing("QUERY_NORMALIZE", query.get("normalize"))
+
+    query_stats = config.get("query_stats", {}) if isinstance(config, dict) else {}
+    set_env_if_missing("QUERY_STATS_TTL_DAYS", query_stats.get("ttl_days"))
+    set_env_if_missing("QUERY_STATS_FLUSH_SEC", query_stats.get("flush_sec"))
+
+    cache = config.get("cache", {}) if isinstance(config, dict) else {}
+    set_env_if_missing("CACHE_FIXED_MIN_COUNT", cache.get("fixed_min_count"))
+    set_env_if_missing("CACHE_FIXED_MIN_TIME_MS", cache.get("fixed_min_time_ms"))
+    set_env_if_missing("CACHE_FIXED_MIN_HITS", cache.get("fixed_min_hits"))
+    set_env_if_missing("CACHE_FIXED_MIN_KB", cache.get("fixed_min_kb"))
+    set_env_if_missing("CACHE_FIXED_TTL_DAYS", cache.get("fixed_ttl_days"))
+    set_env_if_missing("CACHE_FIXED_MAX_ENTRIES", cache.get("fixed_max_entries"))
+    set_env_if_missing("CACHE_FIXED_TRIGGER_COOLDOWN_SEC", cache.get("fixed_trigger_cooldown_sec"))
+    set_env_if_missing("CACHE_MEM_MAX_MB", cache.get("mem_max_mb"))
+    set_env_if_missing("CACHE_MEM_MAX_ENTRIES", cache.get("mem_max_entries"))
+    set_env_if_missing("CACHE_MEM_MAX_RESULT_KB", cache.get("mem_max_result_kb"))
+    set_env_if_missing("CACHE_COMPRESS_MIN_KB", cache.get("compress_min_kb"))
+
+    rebuild = config.get("rebuild", {}) if isinstance(config, dict) else {}
+    set_env_if_missing("REBUILD_SCHEDULE", rebuild.get("schedule"))
+    set_env_if_missing("REBUILD_ALLOW_SHRINK", rebuild.get("allow_shrink"))
+
+    index = config.get("index", {}) if isinstance(config, dict) else {}
+    set_env_if_missing("INDEX_KEEP_GENERATIONS", index.get("keep_generations"))
+    set_env_if_missing("INDEX_KEEP_DAYS", index.get("keep_days"))
+    set_env_if_missing("INDEX_MAX_BYTES", index.get("max_bytes"))
+    set_env_if_missing("INDEX_CLEANUP_GRACE_SEC", index.get("cleanup_grace_sec"))
+    set_env_if_missing("INDEX_STORE_NORMALIZED", index.get("store_normalized"))
+
+    diff = config.get("diff", {}) if isinstance(config, dict) else {}
+    set_env_if_missing("DIFF_MODE", diff.get("mode"))
+    set_env_if_missing("FAST_FP_BYTES", diff.get("fast_fp_bytes"))
+    set_env_if_missing("FULL_HASH_ALGO", diff.get("full_hash_algo"))
+    set_env_if_missing("FULL_HASH_PATHS", encode_csv_list(diff.get("full_hash_paths")))
+    set_env_if_missing("FULL_HASH_EXTS", encode_csv_list(diff.get("full_hash_exts")))
 
 
 def parse_host_aliases() -> Dict[str, str]:
@@ -167,6 +316,8 @@ def parse_configured_folders() -> List[Dict[str, str]]:
 
 def load_config() -> AppConfig:
     load_env()
+    config_data = load_json_config()
+    apply_config_to_env(config_data)
     return AppConfig(
         project_root=PROJECT_ROOT,
         index_dir=INDEX_DIR,
