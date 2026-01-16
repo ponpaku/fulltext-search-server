@@ -13,6 +13,12 @@ const state = {
   filteredResults: null,
   folderListOpen: true,
   isSearching: false,
+  isFetchingMore: false,
+  nextCursor: null,
+  hasMore: false,
+  pageSize: 100,
+  totalCount: null,
+  lastSearchPayload: null,
   spaceMode: 'jp',
   renderedCount: 0,
   groupedResults: null,
@@ -1331,25 +1337,87 @@ const appendNextBatch = () => {
   state.isRenderingBatch = false;
 };
 
-const handleResultsScroll = () => {
-  if (!state.results.length || state.isRenderingBatch) return;
-  if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 200) {
-    appendNextBatch();
+const fetchNextPage = async () => {
+  if (state.isFetchingMore || !state.nextCursor || !state.lastSearchPayload) return;
+  state.isFetchingMore = true;
+  try {
+    const payload = {
+      ...state.lastSearchPayload,
+      cursor: state.nextCursor,
+      include_total: false,
+    };
+    const res = await fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || '追加取得に失敗しました');
+    }
+    const data = await res.json();
+    applySearchPayload(data, { append: true });
+    updateResultCount();
+
+    if (state.viewMode === 'file') {
+      const prevScroll = resultsEl.scrollTop;
+      renderResults();
+      resultsEl.scrollTop = prevScroll;
+    } else if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 220) {
+      appendNextBatch();
+    }
+  } catch (err) {
+    console.error(err);
+  } finally {
+    state.isFetchingMore = false;
   }
 };
 
-const renderResults = (payload) => {
-  if (payload) {
-    const { results, keywords } = payload;
-    state.results = (results || []).map((item, idx) => ({ ...item, _idx: idx }));
-    state.keywords = keywords || [];
+const handleResultsScroll = () => {
+  if ((!state.results.length && !state.hasMore) || state.isRenderingBatch) return;
+  if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 200) {
+    if (state.renderedCount < currentRenderList().length) {
+      appendNextBatch();
+      return;
+    }
+    if (state.hasMore) {
+      fetchNextPage();
+    }
+  }
+};
+
+const applySearchPayload = (payload, options = {}) => {
+  if (!payload) return;
+  const { append = false } = options;
+  const rawResults = payload.results || payload.items || [];
+  const startIdx = append ? state.results.length : 0;
+  const mapped = rawResults.map((item, idx) => ({ ...item, _idx: startIdx + idx }));
+  state.results = append ? state.results.concat(mapped) : mapped;
+  if (payload.keywords) state.keywords = payload.keywords;
+  state.nextCursor = payload.next_cursor || null;
+  state.hasMore = Boolean(payload.next_cursor);
+  if (Number.isFinite(payload.count)) {
+    state.totalCount = payload.count;
+  } else if (!append) {
+    state.totalCount = null;
+  }
+  state.groupedResults = null;
+  if (!append) {
     state.filteredResults = null;
     state.filter.folders = new Set();
     state.filter.extensions = new Set();
     state.detailCache = new Map();
     state.detailRequests = new Map();
-    buildFilterOptions();
-    renderFilterOptions();
+  } else {
+    updateFilteredResults();
+  }
+  buildFilterOptions();
+  renderFilterOptions();
+};
+
+const renderResults = (payload) => {
+  if (payload) {
+    applySearchPayload(payload, { append: false });
   }
 
   updateResultCount();
@@ -1384,11 +1452,23 @@ const renderResults = (payload) => {
 };
 
 const updateResultCount = () => {
-  const total = state.results.length;
+  const fetched = state.results.length;
   const displayCount = getDisplayResults().length;
-  resultCountEl.textContent = state.filteredResults
-    ? `${displayCount} / ${total} 件`
-    : `${total} 件`;
+  const hasKnownTotal = Number.isFinite(state.totalCount);
+  const fetchedLabel = state.hasMore ? `${fetched}+` : `${fetched}`;
+
+  if (hasKnownTotal) {
+    resultCountEl.textContent = state.filteredResults
+      ? `${displayCount} / ${state.totalCount} 件`
+      : `${state.totalCount} 件`;
+    return;
+  }
+
+  if (state.filteredResults) {
+    resultCountEl.textContent = `表示 ${displayCount} / 取得済み ${fetchedLabel} 件`;
+  } else {
+    resultCountEl.textContent = `取得済み ${fetchedLabel} 件`;
+  }
 };
 
 const getExtension = (path) => {
@@ -1454,6 +1534,23 @@ const renderFilterOptions = () => {
   filterExtensionsEl.innerHTML = extHtml;
 };
 
+const updateFilteredResults = () => {
+  const hasFolderFilter = state.filter.folders.size > 0;
+  const hasExtFilter = state.filter.extensions.size > 0;
+
+  if (!hasFolderFilter && !hasExtFilter) {
+    state.filteredResults = null;
+    return;
+  }
+
+  state.filteredResults = state.results.filter((r) => {
+    if (hasFolderFilter && !state.filter.folders.has(r.folderId || 'unknown')) return false;
+    const extKey = getExtension(r.path);
+    if (hasExtFilter && !state.filter.extensions.has(extKey)) return false;
+    return true;
+  });
+};
+
 const applyFilters = () => {
   const selectedFolders = new Set();
   filterFoldersEl?.querySelectorAll('input[type="checkbox"]:checked').forEach((el) => {
@@ -1466,20 +1563,7 @@ const applyFilters = () => {
     selectedExts.add(el.dataset.value);
   });
   state.filter.extensions = selectedExts;
-
-  const hasFolderFilter = state.filter.folders.size > 0;
-  const hasExtFilter = state.filter.extensions.size > 0;
-
-  if (!hasFolderFilter && !hasExtFilter) {
-    state.filteredResults = null;
-  } else {
-    state.filteredResults = state.results.filter((r) => {
-      if (hasFolderFilter && !state.filter.folders.has(r.folderId || 'unknown')) return false;
-      const extKey = getExtension(r.path);
-      if (hasExtFilter && !state.filter.extensions.has(extKey)) return false;
-      return true;
-    });
-  }
+  updateFilteredResults();
 
   updateResultCount();
   if (!getDisplayResults().length) {
@@ -1546,6 +1630,10 @@ const runSearch = async (evt) => {
     range_limit: state.mode === 'AND' ? rangeVal : 0,
     space_mode: spaceMode,
     normalize_mode: normalizeMode,
+    limit: state.pageSize,
+    cursor: null,
+    include_total: false,
+    return_all: false,
     folders: Array.from(state.selected),
   };
   state.spaceMode = spaceMode;
@@ -1562,6 +1650,11 @@ const runSearch = async (evt) => {
   }
 
   state.isSearching = true;
+  state.isFetchingMore = false;
+  state.nextCursor = null;
+  state.hasMore = false;
+  state.totalCount = null;
+  state.lastSearchPayload = payload;
   resultsEl.innerHTML = `
     <div class="loading-state">
       <div class="loading-spinner"></div>
@@ -1587,6 +1680,10 @@ const runSearch = async (evt) => {
     if (normalizeModeSelect && data.normalize_mode && data.normalize_mode !== normalizeModeSelect.value) {
       normalizeModeSelect.value = data.normalize_mode;
     }
+    const baseCount = Number.isFinite(data.count) ? data.count : (data.returned || 0);
+    const historyCount = Number.isFinite(data.count)
+      ? baseCount
+      : `${baseCount}${data.next_cursor ? '+' : ''}`;
     addToQueryHistory(
       query,
       state.mode,
@@ -1594,7 +1691,7 @@ const runSearch = async (evt) => {
       spaceMode,
       effectiveNormalize,
       payload.folders,
-      data.count || 0,
+      historyCount,
       state.currentIndexUuid
     );
 

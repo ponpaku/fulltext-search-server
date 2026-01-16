@@ -10,6 +10,7 @@ import pickle
 import re
 import threading
 import time
+import uuid
 from collections import defaultdict, OrderedDict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -73,6 +74,7 @@ from .search import (
     init_search_worker,
     init_search_worker_shared,
     perform_search_process,
+    search_text_logic,
     search_entries_chunk,
 )
 from .text_utils import (
@@ -408,6 +410,10 @@ class SearchRequest(BaseModel):
     range_limit: int = Field(0, ge=0, le=5000)
     space_mode: str = Field("jp", pattern="^(none|jp|all)$")
     normalize_mode: str | None = Field(None)
+    limit: int = Field(100, ge=1, le=500)
+    cursor: str | None = Field(None)
+    include_total: bool = Field(False)
+    return_all: bool = Field(False)
     folders: List[str]
 
     @field_validator("query")
@@ -590,6 +596,9 @@ file_id_lock = threading.RLock()
 active_client_lock = threading.Lock()
 active_client_heartbeats: Dict[str, float] = {}
 last_search_ts = 0.0
+search_sessions: Dict[str, "SearchCursorSession"] = {}
+search_sessions_lock = threading.Lock()
+SEARCH_CURSOR_TTL_SEC = env_int("SEARCH_CURSOR_TTL_SEC", 600)
 
 state = AppState(
     configured_folders=configured_folders,
@@ -667,6 +676,21 @@ class SearchParams:
     range_limit: int
     space_mode: str
     normalize_mode: str
+
+
+@dataclass
+class SearchCursorSession:
+    session_id: str
+    query: str
+    params: SearchParams
+    target_ids: List[str]
+    raw_keywords: List[str]
+    norm_keyword_groups: List[List[str]]
+    folder_idx: int
+    entry_idx: int
+    index_uuid: str
+    created_at: float
+    last_access: float
 
 
 class AsyncRWLock:
@@ -1887,112 +1911,315 @@ def _try_get_fixed_cache(
     return None
 
 
+def _cleanup_search_sessions(now: float | None = None) -> None:
+    if now is None:
+        now = time.time()
+    expired: List[str] = []
+    with search_sessions_lock:
+        for session_id, session in search_sessions.items():
+            if now - session.last_access > SEARCH_CURSOR_TTL_SEC:
+                expired.append(session_id)
+        for session_id in expired:
+            search_sessions.pop(session_id, None)
+
+
+def _ordered_target_ids(target_ids: List[str]) -> List[str]:
+    fallback = len(folder_order) + 1
+    return sorted(target_ids, key=lambda fid: folder_order.get(fid, fallback))
+
+
+def _create_search_session(
+    query: str,
+    params: "SearchParams",
+    target_ids: List[str],
+    index_uuid: str,
+) -> SearchCursorSession:
+    raw_keywords, norm_keyword_groups = build_query_groups(
+        query,
+        params.space_mode,
+        params.normalize_mode,
+    )
+    session_id = uuid.uuid4().hex
+    now = time.time()
+    session = SearchCursorSession(
+        session_id=session_id,
+        query=query,
+        params=params,
+        target_ids=target_ids,
+        raw_keywords=raw_keywords,
+        norm_keyword_groups=norm_keyword_groups,
+        folder_idx=0,
+        entry_idx=0,
+        index_uuid=index_uuid,
+        created_at=now,
+        last_access=now,
+    )
+    with search_sessions_lock:
+        search_sessions[session_id] = session
+    return session
+
+
+def _get_search_session(cursor: str) -> SearchCursorSession | None:
+    with search_sessions_lock:
+        return search_sessions.get(cursor)
+
+
+def _delete_search_session(cursor: str) -> None:
+    with search_sessions_lock:
+        search_sessions.pop(cursor, None)
+
+
+def _scan_paged_results(
+    session: SearchCursorSession,
+    limit: int,
+    include_detail: bool,
+    include_total: bool,
+) -> Tuple[List[Dict], str | None, int | None]:
+    results: List[Dict] = []
+    total_hits = 0
+    resume_pos: Tuple[int, int] | None = None
+    target_ids = session.target_ids
+    params = session.params
+
+    for f_idx in range(session.folder_idx, len(target_ids)):
+        fid = target_ids[f_idx]
+        folder_name = folder_states[fid]["name"]
+        entries = memory_pages.get(fid)
+        if entries is None:
+            cache = memory_indexes.get(fid, {})
+            entries = build_memory_pages(fid, folder_name, cache)
+            memory_pages[fid] = entries
+        start_idx = session.entry_idx if f_idx == session.folder_idx else 0
+        for e_idx in range(start_idx, len(entries)):
+            entry = entries[e_idx]
+            hit = search_text_logic(
+                entry,
+                session.norm_keyword_groups,
+                session.raw_keywords,
+                params.mode,
+                params.range_limit,
+                params.space_mode,
+                params.normalize_mode,
+                include_detail,
+            )
+            if hit:
+                total_hits += 1
+                if len(results) < limit:
+                    results.extend(hit)
+                    if len(results) >= limit and not include_total:
+                        session.folder_idx = f_idx
+                        session.entry_idx = e_idx + 1
+                        session.last_access = time.time()
+                        return results, session.session_id, None
+                    if len(results) >= limit and include_total and resume_pos is None:
+                        resume_pos = (f_idx, e_idx + 1)
+                elif include_total:
+                    continue
+        session.entry_idx = 0
+
+    session.last_access = time.time()
+    if include_total and resume_pos:
+        has_more = total_hits > len(results)
+        if has_more:
+            session.folder_idx, session.entry_idx = resume_pos
+            return results, session.session_id, total_hits
+    session.folder_idx = len(target_ids)
+    session.entry_idx = 0
+    return results, None, total_hits if include_total else None
+
+
 @app.post("/api/search")
 async def search(req: SearchRequest):
     global rw_lock, search_semaphore, search_executor, search_execution_mode
     if rw_lock is None or search_semaphore is None:
         raise HTTPException(status_code=503, detail="検索システムの初期化中です")
 
-    # Normal search (full index scan)
+    _cleanup_search_sessions()
+
+    # Full scan (compat)
+    if req.return_all:
+        async with search_semaphore:
+            async with rw_lock.read_lock():
+                start_time = time.time()
+                available_ids = set(folder_states.keys())
+                target_ids = [
+                    f for f in req.folders if f in available_ids and folder_states[f].get("ready")
+                ]
+                if not target_ids:
+                    raise HTTPException(status_code=400, detail="有効な検索対象フォルダがありません")
+
+                normalize_mode = resolve_normalize_mode(req.normalize_mode)
+                params = SearchParams(req.mode, req.range_limit, req.space_mode, normalize_mode)
+                cache_key = cache_key_for(req.query, params, target_ids)
+                mark_search_activity()
+
+                # キャッシュからの取得を試行
+                cached_result = _try_get_memory_cache(cache_key, target_ids, req.query, params)
+                if cached_result:
+                    return cached_result
+                cached_result = _try_get_fixed_cache(cache_key, target_ids, req.query, params)
+                if cached_result:
+                    return cached_result
+
+                keywords, norm_keyword_groups = build_query_groups(
+                    req.query,
+                    req.space_mode,
+                    normalize_mode,
+                )
+                raw_keywords = keywords
+                keywords_for_response = keywords
+                worker_count = per_request_workers()
+                loop = asyncio.get_running_loop()
+                if os.getenv("SEARCH_DEBUG", "").strip().lower() in {"1", "true", "yes"}:
+                    folder_debug = []
+                    for fid in target_ids:
+                        name = folder_states[fid]["name"]
+                        entries = memory_pages.get(fid)
+                        folder_debug.append(f"{name}({fid}) entries={len(entries) if entries is not None else 'none'}")
+                    log_info(f"検索デバッグ: query='{req.query}' targets={folder_debug}")
+                if search_execution_mode == "process":
+                    results = await loop.run_in_executor(
+                        search_executor,
+                        perform_search_process,
+                        target_ids,
+                        params,
+                        norm_keyword_groups,
+                        raw_keywords,
+                        worker_count,
+                        False,
+                    )
+                else:
+                    results = await loop.run_in_executor(
+                        None,
+                        perform_search,
+                        target_ids,
+                        params,
+                        norm_keyword_groups,
+                        raw_keywords,
+                        worker_count,
+                        False,
+                    )
+            elapsed = time.time() - start_time
+            log_info(
+                f"検索完了: folders={len(target_ids)} results={len(results)} "
+                f"mode={req.mode} normalize={normalize_mode} workers={worker_count} "
+                f"active_clients={get_active_client_count()} 時間={elapsed:.2f}s"
+            )
+
+            # Get current index UUID
+            current_gen_name = get_current_generation_pointer()
+            index_uuid = current_gen_name or "unknown"
+
+            payload = {
+                "count": len(results),
+                "results": results,
+                "keywords": keywords_for_response,
+                "folder_ids": normalize_folder_ids(target_ids),
+                "index_uuid": index_uuid,
+                "normalize_mode": normalize_mode,
+            }
+            payload = apply_folder_order(payload, folder_order)
+            payload_bytes = estimate_payload_bytes(payload)
+            payload_kb = payload_bytes / 1024
+            update_query_stats(
+                query_stats,
+                cache_key,
+                req.query,
+                params,
+                target_ids,
+                len(results),
+                payload_kb,
+                elapsed * 1000,
+                False,
+            )
+            with cache_lock:
+                if memory_cache:
+                    memory_cache.set(cache_key, payload, payload_bytes)
+            maybe_flush_query_stats()
+
+            if is_fixed_candidate(query_stats.get(cache_key, {})) and cache_key not in fixed_cache_index:
+                trigger_fixed_cache_rebuild(loop, "クエリ条件到達")
+
+            # UI側でハイライトしやすいように検索キーワードも返す
+            return payload
+
+    # Paged search (cursor)
     async with search_semaphore:
         async with rw_lock.read_lock():
             start_time = time.time()
             available_ids = set(folder_states.keys())
-            target_ids = [f for f in req.folders if f in available_ids and folder_states[f].get("ready")]
+            target_ids = [
+                f for f in req.folders if f in available_ids and folder_states[f].get("ready")
+            ]
             if not target_ids:
                 raise HTTPException(status_code=400, detail="有効な検索対象フォルダがありません")
 
             normalize_mode = resolve_normalize_mode(req.normalize_mode)
             params = SearchParams(req.mode, req.range_limit, req.space_mode, normalize_mode)
-            cache_key = cache_key_for(req.query, params, target_ids)
             mark_search_activity()
-
-            # キャッシュからの取得を試行
-            cached_result = _try_get_memory_cache(cache_key, target_ids, req.query, params)
-            if cached_result:
-                return cached_result
-            cached_result = _try_get_fixed_cache(cache_key, target_ids, req.query, params)
-            if cached_result:
-                return cached_result
-
-            keywords, norm_keyword_groups = build_query_groups(
-                req.query,
-                req.space_mode,
-                normalize_mode,
-            )
-            raw_keywords = keywords
-            keywords_for_response = keywords
-            worker_count = per_request_workers()
+            ordered_targets = _ordered_target_ids(target_ids)
             loop = asyncio.get_running_loop()
-            if os.getenv("SEARCH_DEBUG", "").strip().lower() in {"1", "true", "yes"}:
-                folder_debug = []
-                for fid in target_ids:
-                    name = folder_states[fid]["name"]
-                    entries = memory_pages.get(fid)
-                    folder_debug.append(f"{name}({fid}) entries={len(entries) if entries is not None else 'none'}")
-                log_info(f"検索デバッグ: query='{req.query}' targets={folder_debug}")
-            if search_execution_mode == "process":
-                results = await loop.run_in_executor(
-                    search_executor,
-                    perform_search_process,
-                    target_ids,
-                    params,
-                    norm_keyword_groups,
-                    raw_keywords,
-                    worker_count,
-                    False,
-                )
+
+            # Get current index UUID
+            current_gen_name = get_current_generation_pointer()
+            index_uuid = current_gen_name or "unknown"
+
+            if req.cursor:
+                session = _get_search_session(req.cursor)
+                if not session:
+                    raise HTTPException(status_code=404, detail="検索カーソルが無効です")
+                if session.index_uuid != index_uuid:
+                    _delete_search_session(req.cursor)
+                    raise HTTPException(status_code=409, detail="インデックスが更新されました。再検索してください")
+                if session.query != req.query or session.params != params or session.target_ids != ordered_targets:
+                    raise HTTPException(status_code=400, detail="検索条件が一致しません")
             else:
-                results = await loop.run_in_executor(
-                    None,
-                    perform_search,
-                    target_ids,
-                    params,
-                    norm_keyword_groups,
-                    raw_keywords,
-                    worker_count,
-                    False,
-                )
+                session = _create_search_session(req.query, params, ordered_targets, index_uuid)
+
+            results, next_cursor, total_count = await loop.run_in_executor(
+                None,
+                _scan_paged_results,
+                session,
+                req.limit,
+                False,
+                req.include_total,
+            )
+
+            keywords_for_response = session.raw_keywords
+            if next_cursor is None:
+                _delete_search_session(session.session_id)
         elapsed = time.time() - start_time
         log_info(
             f"検索完了: folders={len(target_ids)} results={len(results)} "
-            f"mode={req.mode} normalize={normalize_mode} workers={worker_count} "
+            f"mode={req.mode} normalize={normalize_mode} "
             f"active_clients={get_active_client_count()} 時間={elapsed:.2f}s"
         )
 
-        # Get current index UUID
-        current_gen_name = get_current_generation_pointer()
-        index_uuid = current_gen_name or "unknown"
-
         payload = {
-            "count": len(results),
+            "count": total_count,
+            "returned": len(results),
             "results": results,
             "keywords": keywords_for_response,
             "folder_ids": normalize_folder_ids(target_ids),
             "index_uuid": index_uuid,
             "normalize_mode": normalize_mode,
+            "next_cursor": next_cursor,
         }
         payload = apply_folder_order(payload, folder_order)
         payload_bytes = estimate_payload_bytes(payload)
         payload_kb = payload_bytes / 1024
         update_query_stats(
             query_stats,
-            cache_key,
+            cache_key_for(req.query, params, target_ids),
             req.query,
             params,
             target_ids,
-            len(results),
+            total_count if total_count is not None else len(results),
             payload_kb,
             elapsed * 1000,
             False,
         )
-        with cache_lock:
-            if memory_cache:
-                memory_cache.set(cache_key, payload, payload_bytes)
         maybe_flush_query_stats()
-
-        if is_fixed_candidate(query_stats.get(cache_key, {})) and cache_key not in fixed_cache_index:
-            trigger_fixed_cache_rebuild(loop, "クエリ条件到達")
 
         # UI側でハイライトしやすいように検索キーワードも返す
         return payload
