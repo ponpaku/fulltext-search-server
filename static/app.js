@@ -851,8 +851,8 @@ const executeHistorySearch = async (item) => {
   state.selected = new Set(validFolders);
   renderFolderList(state.folders);
 
-  // Execute search
-  await runSearch();
+  // Focus query input for user to review and submit
+  queryInput.focus();
 };
 
 const renderHistoryList = () => {
