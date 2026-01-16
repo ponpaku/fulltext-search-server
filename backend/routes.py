@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import csv
 import gzip
 import hashlib
@@ -105,6 +106,9 @@ from .warmup import (
     keep_warm_loop as warmup_keep_warm_loop,
     trigger_warmup as warmup_trigger_warmup,
 )
+
+DEFAULT_SEARCH_PAGE_SIZE = 100
+MAX_SEARCH_PAGE_SIZE = 500
 
 
 def perform_search(
@@ -409,6 +413,11 @@ class SearchRequest(BaseModel):
     space_mode: str = Field("jp", pattern="^(none|jp|all)$")
     normalize_mode: str | None = Field(None)
     folders: List[str]
+    limit: int = Field(0, ge=0, le=MAX_SEARCH_PAGE_SIZE)
+    offset: int = Field(0, ge=0)
+    cursor: str | None = Field(None)
+    include_total: bool = Field(True)
+    return_all: bool = Field(False)
 
     @field_validator("query")
     def validate_query(cls, v: str) -> str:
@@ -430,6 +439,14 @@ class SearchRequest(BaseModel):
         if mode not in {"exact", "normalized"}:
             raise ValueError("normalize_mode は exact または normalized を指定してください")
         return mode
+
+    @field_validator("cursor")
+    def validate_cursor(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if not str(v).strip():
+            return None
+        return str(v).strip()
 
 
 class HeartbeatRequest(BaseModel):
@@ -1091,6 +1108,56 @@ def apply_folder_order(payload: Dict, order_map: Dict[str, int]) -> Dict:
     fallback = len(order_map) + 1
     results.sort(key=lambda r: order_map.get(r.get("folderId"), fallback))
     return payload
+
+
+def encode_cursor(offset: int) -> str:
+    token = base64.urlsafe_b64encode(json.dumps({"offset": offset}).encode("utf-8"))
+    return token.decode("utf-8").rstrip("=")
+
+
+def decode_cursor(cursor: str) -> int:
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        raw = base64.urlsafe_b64decode(cursor + padding).decode("utf-8")
+        data = json.loads(raw)
+        offset = int(data.get("offset"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="cursor が不正です") from exc
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="cursor が不正です")
+    return offset
+
+
+def build_paged_payload(
+    payload: Dict,
+    offset: int,
+    limit: int,
+    include_total: bool,
+    return_all: bool,
+) -> Dict:
+    results = payload.get("results", [])
+    total_count = len(results) if isinstance(results, list) else 0
+    response = {key: value for key, value in payload.items() if key != "results"}
+
+    if return_all or limit == 0:
+        items = results
+        next_cursor = None
+    else:
+        items = results[offset:offset + limit]
+        next_cursor = encode_cursor(offset + limit) if offset + limit < total_count else None
+
+    if include_total:
+        response["count"] = total_count
+        response["total"] = total_count
+    else:
+        response.pop("count", None)
+        response.pop("total", None)
+
+    response["results"] = items
+    response["next_cursor"] = next_cursor
+    response["limit"] = limit
+    response["offset"] = offset
+    return response
 
 
 def load_fixed_cache_index() -> Dict[str, Dict]:
@@ -1906,14 +1973,39 @@ async def search(req: SearchRequest):
             params = SearchParams(req.mode, req.range_limit, req.space_mode, normalize_mode)
             cache_key = cache_key_for(req.query, params, target_ids)
             mark_search_activity()
+            limit = req.limit
+            offset = req.offset
+            if req.cursor:
+                offset = decode_cursor(req.cursor)
+                if limit == 0:
+                    limit = DEFAULT_SEARCH_PAGE_SIZE
+            if limit < 0 or limit > MAX_SEARCH_PAGE_SIZE:
+                raise HTTPException(status_code=400, detail="limit は 0 以上の範囲で指定してください")
+            if offset < 0:
+                raise HTTPException(status_code=400, detail="offset は 0 以上の範囲で指定してください")
+            if req.return_all:
+                limit = 0
+                offset = 0
 
             # キャッシュからの取得を試行
             cached_result = _try_get_memory_cache(cache_key, target_ids, req.query, params)
             if cached_result:
-                return cached_result
+                return build_paged_payload(
+                    cached_result,
+                    offset,
+                    limit,
+                    req.include_total,
+                    req.return_all,
+                )
             cached_result = _try_get_fixed_cache(cache_key, target_ids, req.query, params)
             if cached_result:
-                return cached_result
+                return build_paged_payload(
+                    cached_result,
+                    offset,
+                    limit,
+                    req.include_total,
+                    req.return_all,
+                )
 
             keywords, norm_keyword_groups = build_query_groups(
                 req.query,
@@ -1973,6 +2065,13 @@ async def search(req: SearchRequest):
             "normalize_mode": normalize_mode,
         }
         payload = apply_folder_order(payload, folder_order)
+        response_payload = build_paged_payload(
+            payload,
+            offset,
+            limit,
+            req.include_total,
+            req.return_all,
+        )
         payload_bytes = estimate_payload_bytes(payload)
         payload_kb = payload_bytes / 1024
         update_query_stats(
@@ -1995,7 +2094,7 @@ async def search(req: SearchRequest):
             trigger_fixed_cache_rebuild(loop, "クエリ条件到達")
 
         # UI側でハイライトしやすいように検索キーワードも返す
-        return payload
+        return response_payload
 
 
 @app.post("/api/export")

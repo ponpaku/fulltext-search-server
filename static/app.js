@@ -38,7 +38,13 @@ const state = {
   connectionStatus: 'connecting',
   folderLoadState: 'loading',
   loadFoldersPromise: null,
+  nextCursor: null,
+  totalCount: null,
+  searchPayload: null,
+  isLoadingMore: false,
 };
+
+const SEARCH_PAGE_SIZE = 100;
 
 // DOM Elements
 const $ = (id) => document.getElementById(id);
@@ -1298,6 +1304,29 @@ const resetRenderState = () => {
   state.isRenderingBatch = false;
 };
 
+const getSearchItems = (payload) => (
+  payload?.items || payload?.results || []
+);
+
+const hasActiveFilters = () => (
+  state.filter.folders.size > 0 || state.filter.extensions.size > 0
+);
+
+const rebuildFilteredResults = () => {
+  const hasFolderFilter = state.filter.folders.size > 0;
+  const hasExtFilter = state.filter.extensions.size > 0;
+  if (!hasFolderFilter && !hasExtFilter) {
+    state.filteredResults = null;
+    return;
+  }
+  state.filteredResults = state.results.filter((r) => {
+    if (hasFolderFilter && !state.filter.folders.has(r.folderId || 'unknown')) return false;
+    const extKey = getExtension(r.path);
+    if (hasExtFilter && !state.filter.extensions.has(extKey)) return false;
+    return true;
+  });
+};
+
 const getDisplayResults = () => (
   state.filteredResults ? state.filteredResults : state.results
 );
@@ -1335,21 +1364,43 @@ const handleResultsScroll = () => {
   if (!state.results.length || state.isRenderingBatch) return;
   if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 200) {
     appendNextBatch();
+    if (state.renderedCount >= currentRenderList().length) {
+      loadNextPage();
+    }
   }
 };
 
-const renderResults = (payload) => {
-  if (payload) {
-    const { results, keywords } = payload;
-    state.results = (results || []).map((item, idx) => ({ ...item, _idx: idx }));
-    state.keywords = keywords || [];
+const applySearchResponse = (payload, { append = false } = {}) => {
+  if (!payload) return;
+  const items = getSearchItems(payload);
+  const startIndex = append ? state.results.length : 0;
+  const mapped = items.map((item, idx) => ({ ...item, _idx: startIndex + idx }));
+  state.results = append ? state.results.concat(mapped) : mapped;
+  if (payload.keywords) {
+    state.keywords = payload.keywords;
+  }
+  if (Number.isFinite(payload.total)) {
+    state.totalCount = payload.total;
+  } else if (Number.isFinite(payload.count)) {
+    state.totalCount = payload.count;
+  }
+  state.nextCursor = payload.next_cursor || null;
+  if (!append) {
     state.filteredResults = null;
     state.filter.folders = new Set();
     state.filter.extensions = new Set();
     state.detailCache = new Map();
     state.detailRequests = new Map();
-    buildFilterOptions();
-    renderFilterOptions();
+  } else {
+    rebuildFilteredResults();
+  }
+  buildFilterOptions();
+  renderFilterOptions();
+};
+
+const renderResults = (payload, { append = false } = {}) => {
+  if (payload) {
+    applySearchResponse(payload, { append });
   }
 
   updateResultCount();
@@ -1373,9 +1424,12 @@ const renderResults = (payload) => {
     `;
     return;
   }
-  resetRenderState();
-  resultsEl.innerHTML = '<div class="results-list"></div>';
-  resultsEl.scrollTop = 0;
+  const shouldRefresh = !append || state.viewMode === 'file' || hasActiveFilters();
+  if (shouldRefresh) {
+    resetRenderState();
+    resultsEl.innerHTML = '<div class="results-list"></div>';
+    resultsEl.scrollTop = 0;
+  }
   appendNextBatch();
   while (resultsEl.scrollHeight <= resultsEl.clientHeight + 40) {
     if (state.renderedCount >= currentRenderList().length) break;
@@ -1386,6 +1440,14 @@ const renderResults = (payload) => {
 const updateResultCount = () => {
   const total = state.results.length;
   const displayCount = getDisplayResults().length;
+  if (state.totalCount != null) {
+    if (state.filteredResults) {
+      resultCountEl.textContent = `${displayCount} / ${total} 件 (全${state.totalCount}件)`;
+    } else {
+      resultCountEl.textContent = `${total} / ${state.totalCount} 件`;
+    }
+    return;
+  }
   resultCountEl.textContent = state.filteredResults
     ? `${displayCount} / ${total} 件`
     : `${total} 件`;
@@ -1532,6 +1594,34 @@ const clearFilters = () => {
 // SEARCH
 // ═══════════════════════════════════════════════════════════════
 
+const loadNextPage = async () => {
+  if (!state.nextCursor || state.isLoadingMore || !state.searchPayload) return;
+  state.isLoadingMore = true;
+  try {
+    const payload = {
+      ...state.searchPayload,
+      cursor: state.nextCursor,
+      include_total: false,
+    };
+    const res = await fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || '検索に失敗しました');
+    }
+    const data = await res.json();
+    renderResults(data, { append: true });
+  } catch (err) {
+    console.error(err);
+    showNotice('追加取得に失敗しました');
+  } finally {
+    state.isLoadingMore = false;
+  }
+};
+
 const runSearch = async (evt) => {
   evt?.preventDefault();
   if (state.isSearching) return;
@@ -1547,6 +1637,8 @@ const runSearch = async (evt) => {
     space_mode: spaceMode,
     normalize_mode: normalizeMode,
     folders: Array.from(state.selected),
+    limit: SEARCH_PAGE_SIZE,
+    include_total: true,
   };
   state.spaceMode = spaceMode;
   state.normalizeMode = normalizeMode;
@@ -1561,6 +1653,8 @@ const runSearch = async (evt) => {
     return;
   }
 
+  state.searchPayload = payload;
+  state.totalCount = null;
   state.isSearching = true;
   resultsEl.innerHTML = `
     <div class="loading-state">
@@ -1587,6 +1681,7 @@ const runSearch = async (evt) => {
     if (normalizeModeSelect && data.normalize_mode && data.normalize_mode !== normalizeModeSelect.value) {
       normalizeModeSelect.value = data.normalize_mode;
     }
+    const totalCount = Number.isFinite(data.total) ? data.total : (data.count || 0);
     addToQueryHistory(
       query,
       state.mode,
@@ -1594,7 +1689,7 @@ const runSearch = async (evt) => {
       spaceMode,
       effectiveNormalize,
       payload.folders,
-      data.count || 0,
+      totalCount,
       state.currentIndexUuid
     );
 
