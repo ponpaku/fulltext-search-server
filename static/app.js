@@ -816,19 +816,24 @@ const formatTimestamp = (timestamp) => {
 const executeHistorySearch = async (item) => {
   closeHistoryModal();
 
+  // Ensure folders are loaded before restoring selection
+  if (!state.folders.length || state.folderLoadState === 'loading') {
+    await loadFolders();
+  }
+
   // Restore form state
   queryInput.value = item.query;
   setMode(item.mode);
-  if (item.mode === 'OR') {
-    rangeInput.value = 0;
-  } else {
-    rangeInput.value = item.range_limit || 0;
-  }
+  // Restore range: 0 for OR mode, otherwise use saved value
+  const rangeValue = item.mode === 'OR' ? 0 : (item.range_limit || 0);
+  rangeInput.value = rangeValue;
   spaceModeSelect.value = item.space_mode || 'jp';
   normalizeModeSelect.value = item.normalize_mode || 'exact';
 
-  // Restore folder selection
-  state.selected = new Set(item.folders);
+  // Restore folder selection (filter out stale IDs)
+  const validIds = new Set(state.folders.map(f => f.id));
+  const validFolders = item.folders.filter(id => validIds.has(id));
+  state.selected = new Set(validFolders);
   renderFolderList(state.folders);
 
   // Execute search
