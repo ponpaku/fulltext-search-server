@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import csv
 import gzip
 import hashlib
@@ -402,6 +403,10 @@ def build_process_shared_store() -> List[Dict]:
 
 
 # --- リクエストモデル ---
+SEARCH_PAGE_DEFAULT = 100
+SEARCH_PAGE_MAX = 1000
+
+
 class SearchRequest(BaseModel):
     query: str = Field(..., description="検索キーワード（空白区切り）")
     mode: str = Field("AND", pattern="^(AND|OR)$")
@@ -409,6 +414,10 @@ class SearchRequest(BaseModel):
     space_mode: str = Field("jp", pattern="^(none|jp|all)$")
     normalize_mode: str | None = Field(None)
     folders: List[str]
+    limit: int | None = Field(None, ge=1, le=SEARCH_PAGE_MAX)
+    cursor: str | None = Field(None)
+    include_total: bool = Field(False)
+    return_all: bool = Field(False)
 
     @field_validator("query")
     def validate_query(cls, v: str) -> str:
@@ -1043,6 +1052,28 @@ def normalize_query_key(query: str) -> str:
     return " ".join((query or "").strip().split())
 
 
+def encode_search_cursor(cache_key: str, offset: int) -> str:
+    payload = json.dumps({"k": cache_key, "o": offset}, separators=(",", ":"), ensure_ascii=False)
+    encoded = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("utf-8")
+    return encoded.rstrip("=")
+
+
+def decode_search_cursor(token: str) -> Tuple[str, int]:
+    padded = token + "=" * (-len(token) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8")
+        data = json.loads(raw)
+    except Exception as exc:
+        raise ValueError("cursorの形式が不正です") from exc
+    if not isinstance(data, dict):
+        raise ValueError("cursorの形式が不正です")
+    cache_key = data.get("k")
+    offset = data.get("o")
+    if not isinstance(cache_key, str) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("cursorの形式が不正です")
+    return cache_key, offset
+
+
 def cache_key_for(query: str, params: "SearchParams", target_ids: List[str]) -> str:
     payload = {
         "v": SEARCH_CACHE_VERSION,
@@ -1091,6 +1122,35 @@ def apply_folder_order(payload: Dict, order_map: Dict[str, int]) -> Dict:
     fallback = len(order_map) + 1
     results.sort(key=lambda r: order_map.get(r.get("folderId"), fallback))
     return payload
+
+
+def build_search_response(
+    payload: Dict,
+    cache_key: str,
+    limit: int | None,
+    offset: int,
+    include_total: bool,
+) -> Dict:
+    results = payload.get("results")
+    if limit is None or not isinstance(results, list):
+        return payload
+    total = len(results)
+    start = max(0, min(offset, total))
+    end = min(start + limit, total)
+    items = results[start:end]
+    next_cursor = encode_search_cursor(cache_key, end) if end < total else None
+    response = {
+        "count": total,
+        "items": items,
+        "next_cursor": next_cursor,
+        "keywords": payload.get("keywords", []),
+        "folder_ids": payload.get("folder_ids", []),
+        "index_uuid": payload.get("index_uuid", "unknown"),
+        "normalize_mode": payload.get("normalize_mode"),
+    }
+    if include_total:
+        response["total"] = total
+    return response
 
 
 def load_fixed_cache_index() -> Dict[str, Dict]:
@@ -1905,15 +1965,39 @@ async def search(req: SearchRequest):
             normalize_mode = resolve_normalize_mode(req.normalize_mode)
             params = SearchParams(req.mode, req.range_limit, req.space_mode, normalize_mode)
             cache_key = cache_key_for(req.query, params, target_ids)
+            limit = None
+            offset = 0
+            if not req.return_all and (req.limit is not None or req.cursor is not None):
+                limit = req.limit or SEARCH_PAGE_DEFAULT
+                if req.cursor:
+                    try:
+                        cursor_key, cursor_offset = decode_search_cursor(req.cursor)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+                    if cursor_key != cache_key:
+                        raise HTTPException(status_code=400, detail="cursorが検索条件と一致しません")
+                    offset = cursor_offset
             mark_search_activity()
 
             # キャッシュからの取得を試行
             cached_result = _try_get_memory_cache(cache_key, target_ids, req.query, params)
             if cached_result:
-                return cached_result
+                return build_search_response(
+                    cached_result,
+                    cache_key,
+                    limit,
+                    offset,
+                    req.include_total,
+                )
             cached_result = _try_get_fixed_cache(cache_key, target_ids, req.query, params)
             if cached_result:
-                return cached_result
+                return build_search_response(
+                    cached_result,
+                    cache_key,
+                    limit,
+                    offset,
+                    req.include_total,
+                )
 
             keywords, norm_keyword_groups = build_query_groups(
                 req.query,
@@ -1957,7 +2041,8 @@ async def search(req: SearchRequest):
         log_info(
             f"検索完了: folders={len(target_ids)} results={len(results)} "
             f"mode={req.mode} normalize={normalize_mode} workers={worker_count} "
-            f"active_clients={get_active_client_count()} 時間={elapsed:.2f}s"
+            f"active_clients={get_active_client_count()} limit={limit or 'all'} "
+            f"offset={offset} 時間={elapsed:.2f}s"
         )
 
         # Get current index UUID
@@ -1995,7 +2080,7 @@ async def search(req: SearchRequest):
             trigger_fixed_cache_rebuild(loop, "クエリ条件到達")
 
         # UI側でハイライトしやすいように検索キーワードも返す
-        return payload
+        return build_search_response(payload, cache_key, limit, offset, req.include_total)
 
 
 @app.post("/api/export")
