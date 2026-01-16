@@ -1,8 +1,10 @@
+import json
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from dotenv import load_dotenv, find_dotenv
 
@@ -89,6 +91,199 @@ def load_env() -> None:
     load_dotenv()
     if not had_search_folders and raw_search_folders is not None:
         os.environ["SEARCH_FOLDERS"] = raw_search_folders
+    apply_config_json()
+
+
+def _set_env_if_missing(key: str, value: Any) -> None:
+    if value is None:
+        return
+    current = os.environ.get(key)
+    if current is not None and current != "":
+        return
+    if isinstance(value, bool):
+        os.environ[key] = "1" if value else "0"
+        return
+    if isinstance(value, (int, float)):
+        os.environ[key] = str(value)
+        return
+    text = str(value).strip()
+    if text:
+        os.environ[key] = text
+
+
+def _serialize_folders(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, list):
+        return ""
+    parts: List[str] = []
+    for item in value:
+        if isinstance(item, str):
+            entry = item.strip()
+            if entry:
+                parts.append(entry)
+            continue
+        if isinstance(item, dict):
+            path = str(item.get("path", "")).strip()
+            if not path:
+                continue
+            label = str(item.get("label", "")).strip()
+            parts.append(f"{label}={path}" if label else path)
+    return ";".join(parts)
+
+
+def _serialize_kv_map(value: Any) -> str:
+    if isinstance(value, dict):
+        entries = []
+        for key, val in value.items():
+            key_str = str(key).strip()
+            val_str = str(val).strip()
+            if key_str and val_str:
+                entries.append(f"{key_str}={val_str}")
+        return ";".join(entries)
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _serialize_list(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return ",".join(items)
+    return ""
+
+
+def load_config_json() -> Dict[str, Any]:
+    config_path = os.getenv("CONFIG_PATH", "").strip()
+    path = Path(config_path) if config_path else BASE_DIR / "config.json"
+    path = path.expanduser()
+    if not path.is_absolute():
+        path = (BASE_DIR / path).resolve()
+    if not path.exists():
+        example_path = BASE_DIR / "config.example.json"
+        if example_path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                shutil.copy(example_path, path)
+            raise RuntimeError(
+                f"{path} が見つからないため config.example.json をコピーしました。"
+                "内容を編集して再起動してください。"
+            )
+        raise RuntimeError(
+            f"{path} が見つかりません。config.example.json を作成して設定してください。"
+        )
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+            return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{path} の読み込みに失敗しました: {exc}") from exc
+
+
+def apply_config_json() -> None:
+    config = load_config_json()
+    if not config:
+        return
+
+    search = config.get("search", {})
+    _set_env_if_missing("SEARCH_FOLDERS", _serialize_folders(search.get("folders")))
+    _set_env_if_missing(
+        "SEARCH_FOLDER_ALIASES", _serialize_kv_map(search.get("folder_aliases"))
+    )
+    _set_env_if_missing("SEARCH_EXECUTION_MODE", search.get("execution_mode"))
+    _set_env_if_missing("SEARCH_PROCESS_SHARED", search.get("process_shared"))
+    _set_env_if_missing("SEARCH_CPU_BUDGET", search.get("cpu_budget"))
+    _set_env_if_missing("SEARCH_CONCURRENCY", search.get("concurrency"))
+    _set_env_if_missing("SEARCH_WORKERS", search.get("workers"))
+
+    front = config.get("front", {})
+    _set_env_if_missing("FRONT_RESULTS_BATCH_SIZE", front.get("results_batch_size"))
+    _set_env_if_missing(
+        "FRONT_RESULTS_SCROLL_THRESHOLD_PX",
+        front.get("results_scroll_threshold_px"),
+    )
+    _set_env_if_missing("FRONT_HISTORY_MAX_ITEMS", front.get("history_max_items"))
+    _set_env_if_missing("FRONT_RANGE_MAX", front.get("range_max"))
+    _set_env_if_missing("FRONT_RANGE_DEFAULT", front.get("range_default"))
+    _set_env_if_missing("FRONT_SPACE_MODE_DEFAULT", front.get("space_mode_default"))
+    _set_env_if_missing(
+        "FRONT_NORMALIZE_MODE_DEFAULT", front.get("normalize_mode_default")
+    )
+    _set_env_if_missing(
+        "FRONT_HEARTBEAT_INTERVAL_MS", front.get("heartbeat_interval_ms")
+    )
+    _set_env_if_missing(
+        "FRONT_HEARTBEAT_JITTER_MS", front.get("heartbeat_jitter_ms")
+    )
+    _set_env_if_missing(
+        "FRONT_HEARTBEAT_MIN_GAP_MS", front.get("heartbeat_min_gap_ms")
+    )
+    _set_env_if_missing(
+        "FRONT_HEARTBEAT_INTERACTION_GAP_MS",
+        front.get("heartbeat_interaction_gap_ms"),
+    )
+    _set_env_if_missing(
+        "FRONT_HEARTBEAT_IDLE_THRESHOLD_MS",
+        front.get("heartbeat_idle_threshold_ms"),
+    )
+    _set_env_if_missing(
+        "FRONT_HEARTBEAT_FAIL_THRESHOLD", front.get("heartbeat_fail_threshold")
+    )
+    _set_env_if_missing(
+        "FRONT_HEARTBEAT_STALE_MULTIPLIER", front.get("heartbeat_stale_multiplier")
+    )
+    _set_env_if_missing(
+        "FRONT_HEALTH_CHECK_INTERVAL_MS", front.get("health_check_interval_ms")
+    )
+    _set_env_if_missing(
+        "FRONT_HEALTH_CHECK_JITTER_MS", front.get("health_check_jitter_ms")
+    )
+
+    query = config.get("query", {})
+    normalize_mode = query.get("normalize")
+    if normalize_mode is None:
+        normalize_mode = config.get("query_normalize")
+    _set_env_if_missing("QUERY_NORMALIZE", normalize_mode)
+
+    query_stats = config.get("query_stats", {})
+    _set_env_if_missing("QUERY_STATS_TTL_DAYS", query_stats.get("ttl_days"))
+    _set_env_if_missing("QUERY_STATS_FLUSH_SEC", query_stats.get("flush_sec"))
+
+    cache = config.get("cache", {})
+    _set_env_if_missing("CACHE_FIXED_MIN_COUNT", cache.get("fixed_min_count"))
+    _set_env_if_missing("CACHE_FIXED_MIN_TIME_MS", cache.get("fixed_min_time_ms"))
+    _set_env_if_missing("CACHE_FIXED_MIN_HITS", cache.get("fixed_min_hits"))
+    _set_env_if_missing("CACHE_FIXED_MIN_KB", cache.get("fixed_min_kb"))
+    _set_env_if_missing("CACHE_FIXED_TTL_DAYS", cache.get("fixed_ttl_days"))
+    _set_env_if_missing("CACHE_FIXED_MAX_ENTRIES", cache.get("fixed_max_entries"))
+    _set_env_if_missing(
+        "CACHE_FIXED_TRIGGER_COOLDOWN_SEC",
+        cache.get("fixed_trigger_cooldown_sec"),
+    )
+    _set_env_if_missing("CACHE_MEM_MAX_MB", cache.get("mem_max_mb"))
+    _set_env_if_missing("CACHE_MEM_MAX_ENTRIES", cache.get("mem_max_entries"))
+    _set_env_if_missing("CACHE_MEM_MAX_RESULT_KB", cache.get("mem_max_result_kb"))
+    _set_env_if_missing("CACHE_COMPRESS_MIN_KB", cache.get("compress_min_kb"))
+
+    rebuild = config.get("rebuild", {})
+    _set_env_if_missing("REBUILD_SCHEDULE", rebuild.get("schedule"))
+    _set_env_if_missing("REBUILD_ALLOW_SHRINK", rebuild.get("allow_shrink"))
+
+    index = config.get("index", {})
+    _set_env_if_missing("INDEX_KEEP_GENERATIONS", index.get("keep_generations"))
+    _set_env_if_missing("INDEX_KEEP_DAYS", index.get("keep_days"))
+    _set_env_if_missing("INDEX_MAX_BYTES", index.get("max_bytes"))
+    _set_env_if_missing("INDEX_CLEANUP_GRACE_SEC", index.get("cleanup_grace_sec"))
+    _set_env_if_missing("INDEX_STORE_NORMALIZED", index.get("store_normalized"))
+
+    diff = config.get("diff", {})
+    _set_env_if_missing("DIFF_MODE", diff.get("mode"))
+    _set_env_if_missing("FAST_FP_BYTES", diff.get("fast_fp_bytes"))
+    _set_env_if_missing("FULL_HASH_ALGO", diff.get("full_hash_algo"))
+    _set_env_if_missing("FULL_HASH_PATHS", _serialize_list(diff.get("full_hash_paths")))
+    _set_env_if_missing("FULL_HASH_EXTS", _serialize_list(diff.get("full_hash_exts")))
 
 
 def parse_host_aliases() -> Dict[str, str]:

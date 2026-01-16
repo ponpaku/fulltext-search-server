@@ -634,7 +634,7 @@ const renderFolderStatus = (folders) => {
         <span class="status-dot"></span>
         <div class="status-info">
           <span class="status-name">未設定</span>
-          <span class="status-detail">.env で SEARCH_FOLDERS を設定してください</span>
+          <span class="status-detail">config.json で SEARCH_FOLDERS を設定してください</span>
         </div>
       </div>
     `;

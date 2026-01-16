@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example.txt
+config.json
 .venv/
 venv/
 __pycache__/
