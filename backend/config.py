@@ -1,8 +1,12 @@
+import json
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
+
+from .utils import log_warn
 
 from dotenv import load_dotenv, find_dotenv
 
@@ -45,6 +49,7 @@ DEFAULT_CACHE_MAX_RESULT_KB = 2000
 DEFAULT_HEARTBEAT_TTL_SEC = 90
 
 STATIC_DIR = BASE_DIR / "static"
+CONFIG_EXAMPLE_PATH = BASE_DIR / "config.example.json"
 
 
 @dataclass
@@ -89,6 +94,187 @@ def load_env() -> None:
     load_dotenv()
     if not had_search_folders and raw_search_folders is not None:
         os.environ["SEARCH_FOLDERS"] = raw_search_folders
+
+
+def _resolve_config_path() -> Path:
+    raw = os.getenv("CONFIG_PATH", "").strip() or "config.json"
+    path = Path(raw)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path
+
+
+def _stringify_config_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return str(value)
+
+
+def _set_env_if_missing(name: str, value: object | None) -> None:
+    if value is None or name in os.environ:
+        return
+    os.environ[name] = _stringify_config_value(value)
+
+
+def _build_search_folders_value(folders: list) -> str:
+    entries: list[str] = []
+    for entry in folders:
+        label = ""
+        path = ""
+        if isinstance(entry, dict):
+            label = str(entry.get("label") or "")
+            path = str(entry.get("path") or "")
+        elif isinstance(entry, str):
+            path = entry
+        if not path:
+            continue
+        entries.append(f"{label}={path}" if label else path)
+    return ";".join(entries)
+
+
+def _build_aliases_value(aliases: dict) -> str:
+    entries: list[str] = []
+    for key, value in aliases.items():
+        if key is None or value is None:
+            continue
+        key_str = str(key).strip()
+        value_str = str(value).strip()
+        if key_str and value_str:
+            entries.append(f"{key_str}={value_str}")
+    return ";".join(entries)
+
+
+def _apply_config_env(config: dict) -> None:
+    if not isinstance(config, dict):
+        return
+
+    search = config.get("search")
+    if isinstance(search, dict):
+        folders = search.get("folders")
+        if isinstance(folders, list):
+            folders_value = _build_search_folders_value(folders)
+            if folders_value:
+                _set_env_if_missing("SEARCH_FOLDERS", folders_value)
+
+        aliases = search.get("folder_aliases")
+        if isinstance(aliases, dict):
+            aliases_value = _build_aliases_value(aliases)
+            if aliases_value:
+                _set_env_if_missing("SEARCH_FOLDER_ALIASES", aliases_value)
+
+        _set_env_if_missing("SEARCH_EXECUTION_MODE", search.get("execution_mode"))
+        _set_env_if_missing("SEARCH_PROCESS_SHARED", search.get("process_shared"))
+        _set_env_if_missing("SEARCH_CPU_BUDGET", search.get("cpu_budget"))
+        _set_env_if_missing("SEARCH_CONCURRENCY", search.get("concurrency"))
+        _set_env_if_missing("SEARCH_WORKERS", search.get("workers"))
+        if search.get("query_normalize") is not None:
+            _set_env_if_missing("QUERY_NORMALIZE", search.get("query_normalize"))
+
+    front = config.get("front")
+    if isinstance(front, dict):
+        front_map = {
+            "results_batch_size": "FRONT_RESULTS_BATCH_SIZE",
+            "results_scroll_threshold_px": "FRONT_RESULTS_SCROLL_THRESHOLD_PX",
+            "history_max_items": "FRONT_HISTORY_MAX_ITEMS",
+            "range_max": "FRONT_RANGE_MAX",
+            "range_default": "FRONT_RANGE_DEFAULT",
+            "space_mode_default": "FRONT_SPACE_MODE_DEFAULT",
+            "normalize_mode_default": "FRONT_NORMALIZE_MODE_DEFAULT",
+            "heartbeat_interval_ms": "FRONT_HEARTBEAT_INTERVAL_MS",
+            "heartbeat_jitter_ms": "FRONT_HEARTBEAT_JITTER_MS",
+            "heartbeat_min_gap_ms": "FRONT_HEARTBEAT_MIN_GAP_MS",
+            "heartbeat_interaction_gap_ms": "FRONT_HEARTBEAT_INTERACTION_GAP_MS",
+            "heartbeat_idle_threshold_ms": "FRONT_HEARTBEAT_IDLE_THRESHOLD_MS",
+            "heartbeat_fail_threshold": "FRONT_HEARTBEAT_FAIL_THRESHOLD",
+            "heartbeat_stale_multiplier": "FRONT_HEARTBEAT_STALE_MULTIPLIER",
+            "health_check_interval_ms": "FRONT_HEALTH_CHECK_INTERVAL_MS",
+            "health_check_jitter_ms": "FRONT_HEALTH_CHECK_JITTER_MS",
+        }
+        for key, env_name in front_map.items():
+            if key in front:
+                _set_env_if_missing(env_name, front.get(key))
+
+    query_stats = config.get("query_stats")
+    if isinstance(query_stats, dict):
+        _set_env_if_missing("QUERY_STATS_TTL_DAYS", query_stats.get("ttl_days"))
+        _set_env_if_missing("QUERY_STATS_FLUSH_SEC", query_stats.get("flush_sec"))
+
+    cache = config.get("cache")
+    if isinstance(cache, dict):
+        cache_map = {
+            "fixed_min_count": "CACHE_FIXED_MIN_COUNT",
+            "fixed_min_time_ms": "CACHE_FIXED_MIN_TIME_MS",
+            "fixed_min_hits": "CACHE_FIXED_MIN_HITS",
+            "fixed_min_kb": "CACHE_FIXED_MIN_KB",
+            "fixed_ttl_days": "CACHE_FIXED_TTL_DAYS",
+            "fixed_max_entries": "CACHE_FIXED_MAX_ENTRIES",
+            "fixed_trigger_cooldown_sec": "CACHE_FIXED_TRIGGER_COOLDOWN_SEC",
+            "mem_max_mb": "CACHE_MEM_MAX_MB",
+            "mem_max_entries": "CACHE_MEM_MAX_ENTRIES",
+            "mem_max_result_kb": "CACHE_MEM_MAX_RESULT_KB",
+            "compress_min_kb": "CACHE_COMPRESS_MIN_KB",
+        }
+        for key, env_name in cache_map.items():
+            if key in cache:
+                _set_env_if_missing(env_name, cache.get(key))
+
+    rebuild = config.get("rebuild")
+    if isinstance(rebuild, dict):
+        _set_env_if_missing("REBUILD_SCHEDULE", rebuild.get("schedule"))
+        if "allow_shrink" in rebuild:
+            _set_env_if_missing("REBUILD_ALLOW_SHRINK", rebuild.get("allow_shrink"))
+
+    index = config.get("index")
+    if isinstance(index, dict):
+        index_map = {
+            "keep_generations": "INDEX_KEEP_GENERATIONS",
+            "keep_days": "INDEX_KEEP_DAYS",
+            "max_bytes": "INDEX_MAX_BYTES",
+            "cleanup_grace_sec": "INDEX_CLEANUP_GRACE_SEC",
+            "store_normalized": "INDEX_STORE_NORMALIZED",
+        }
+        for key, env_name in index_map.items():
+            if key in index:
+                _set_env_if_missing(env_name, index.get(key))
+
+    diff = config.get("diff")
+    if isinstance(diff, dict):
+        _set_env_if_missing("DIFF_MODE", diff.get("mode"))
+        _set_env_if_missing("FAST_FP_BYTES", diff.get("fast_fp_bytes"))
+        _set_env_if_missing("FULL_HASH_ALGO", diff.get("full_hash_algo"))
+        full_hash_paths = diff.get("full_hash_paths")
+        if isinstance(full_hash_paths, list) and full_hash_paths:
+            _set_env_if_missing("FULL_HASH_PATHS", ",".join(str(p) for p in full_hash_paths if p))
+        full_hash_exts = diff.get("full_hash_exts")
+        if isinstance(full_hash_exts, list) and full_hash_exts:
+            _set_env_if_missing("FULL_HASH_EXTS", ",".join(str(e) for e in full_hash_exts if e))
+
+    if "query_normalize" in config:
+        _set_env_if_missing("QUERY_NORMALIZE", config.get("query_normalize"))
+    if "index_store_normalized" in config:
+        _set_env_if_missing("INDEX_STORE_NORMALIZED", config.get("index_store_normalized"))
+
+
+def _load_json_config() -> dict:
+    config_path = _resolve_config_path()
+    if not config_path.exists():
+        if CONFIG_EXAMPLE_PATH.exists():
+            try:
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(CONFIG_EXAMPLE_PATH, config_path)
+                log_warn(
+                    "config.json が見つからないため config.example.json をコピーしました。"
+                    f" 設定後に再起動してください: {config_path}"
+                )
+            except OSError as exc:
+                log_warn(f"config.json の作成に失敗しました: {exc}")
+        raise RuntimeError(f"config.json が見つかりません: {config_path}")
+    try:
+        with open(config_path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+            return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"config.json の解析に失敗しました: {exc}") from exc
 
 
 def parse_host_aliases() -> Dict[str, str]:
@@ -167,6 +353,8 @@ def parse_configured_folders() -> List[Dict[str, str]]:
 
 def load_config() -> AppConfig:
     load_env()
+    config_data = _load_json_config()
+    _apply_config_env(config_data)
     return AppConfig(
         project_root=PROJECT_ROOT,
         index_dir=INDEX_DIR,
