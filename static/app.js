@@ -195,7 +195,10 @@ const mergeFrontendConfig = (payload) => {
 const loadFrontendConfig = async () => {
   try {
     const res = await fetch(`/api/config?ts=${Date.now()}`);
-    if (!res.ok) return false;
+    if (!res.ok) {
+      console.warn(`Failed to load frontend config: HTTP ${res.status}`);
+      return false;
+    }
     const payload = await res.json();
     const configPayload = payload?.frontend || payload?.config || payload;
     mergeFrontendConfig(configPayload);

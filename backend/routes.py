@@ -1397,12 +1397,15 @@ def total_worker_budget() -> int:
     return max(1, os.cpu_count() or 4)
 
 
-def optional_env_int(name: str) -> int | None:
+def optional_env_int(name: str, min_val: int | None = None) -> int | None:
     raw = os.getenv(name, "").strip()
     if not raw:
         return None
     try:
-        return int(raw)
+        val = int(raw)
+        if min_val is not None and val < min_val:
+            return None
+        return val
     except ValueError:
         return None
 
@@ -1416,47 +1419,47 @@ def build_frontend_config() -> Dict[str, Dict]:
     config: Dict[str, Dict] = {}
 
     heartbeat: Dict[str, int] = {}
-    for env_name, key in (
-        ("FRONT_HEARTBEAT_INTERVAL_MS", "interval_ms"),
-        ("FRONT_HEARTBEAT_JITTER_MS", "jitter_ms"),
-        ("FRONT_HEARTBEAT_MIN_GAP_MS", "min_gap_ms"),
-        ("FRONT_HEARTBEAT_INTERACTION_GAP_MS", "interaction_gap_ms"),
-        ("FRONT_HEARTBEAT_IDLE_THRESHOLD_MS", "idle_threshold_ms"),
-        ("FRONT_HEARTBEAT_FAIL_THRESHOLD", "fail_threshold"),
-        ("FRONT_HEARTBEAT_STALE_MULTIPLIER", "stale_multiplier"),
-        ("FRONT_HEALTH_CHECK_INTERVAL_MS", "health_check_interval_ms"),
-        ("FRONT_HEALTH_CHECK_JITTER_MS", "health_check_jitter_ms"),
+    for env_name, key, min_val in (
+        ("FRONT_HEARTBEAT_INTERVAL_MS", "interval_ms", 1000),
+        ("FRONT_HEARTBEAT_JITTER_MS", "jitter_ms", 0),
+        ("FRONT_HEARTBEAT_MIN_GAP_MS", "min_gap_ms", 0),
+        ("FRONT_HEARTBEAT_INTERACTION_GAP_MS", "interaction_gap_ms", 0),
+        ("FRONT_HEARTBEAT_IDLE_THRESHOLD_MS", "idle_threshold_ms", 0),
+        ("FRONT_HEARTBEAT_FAIL_THRESHOLD", "fail_threshold", 1),
+        ("FRONT_HEARTBEAT_STALE_MULTIPLIER", "stale_multiplier", 1),
+        ("FRONT_HEALTH_CHECK_INTERVAL_MS", "health_check_interval_ms", 1000),
+        ("FRONT_HEALTH_CHECK_JITTER_MS", "health_check_jitter_ms", 0),
     ):
-        value = optional_env_int(env_name)
+        value = optional_env_int(env_name, min_val)
         if value is not None:
             heartbeat[key] = value
     if heartbeat:
         config["heartbeat"] = heartbeat
 
     rendering: Dict[str, int] = {}
-    for env_name, key in (
-        ("FRONT_RESULTS_BATCH_SIZE", "batch_size"),
-        ("FRONT_RESULTS_SCROLL_THRESHOLD_PX", "scroll_threshold_px"),
+    for env_name, key, min_val in (
+        ("FRONT_RESULTS_BATCH_SIZE", "batch_size", 1),
+        ("FRONT_RESULTS_SCROLL_THRESHOLD_PX", "scroll_threshold_px", 0),
     ):
-        value = optional_env_int(env_name)
+        value = optional_env_int(env_name, min_val)
         if value is not None:
             rendering[key] = value
     if rendering:
         config["rendering"] = rendering
 
     history: Dict[str, int] = {}
-    value = optional_env_int("FRONT_HISTORY_MAX_ITEMS")
+    value = optional_env_int("FRONT_HISTORY_MAX_ITEMS", 1)
     if value is not None:
         history["max_items"] = value
     if history:
         config["history"] = history
 
     range_config: Dict[str, int] = {}
-    for env_name, key in (
-        ("FRONT_RANGE_MAX", "max"),
-        ("FRONT_RANGE_DEFAULT", "default"),
+    for env_name, key, min_val in (
+        ("FRONT_RANGE_MAX", "max", 0),
+        ("FRONT_RANGE_DEFAULT", "default", 0),
     ):
-        value = optional_env_int(env_name)
+        value = optional_env_int(env_name, min_val)
         if value is not None:
             range_config[key] = value
     if range_config:
