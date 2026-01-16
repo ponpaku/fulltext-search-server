@@ -1397,6 +1397,91 @@ def total_worker_budget() -> int:
     return max(1, os.cpu_count() or 4)
 
 
+def optional_env_int(name: str, min_val: int | None = None) -> int | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        val = int(raw)
+        if min_val is not None and val < min_val:
+            return None
+        return val
+    except ValueError:
+        return None
+
+
+def optional_env_str(name: str) -> str | None:
+    raw = os.getenv(name, "").strip()
+    return raw or None
+
+
+def build_frontend_config() -> Dict[str, Dict]:
+    config: Dict[str, Dict] = {}
+
+    heartbeat: Dict[str, int] = {}
+    for env_name, key, min_val in (
+        ("FRONT_HEARTBEAT_INTERVAL_MS", "interval_ms", 1000),
+        ("FRONT_HEARTBEAT_JITTER_MS", "jitter_ms", 0),
+        ("FRONT_HEARTBEAT_MIN_GAP_MS", "min_gap_ms", 0),
+        ("FRONT_HEARTBEAT_INTERACTION_GAP_MS", "interaction_gap_ms", 0),
+        ("FRONT_HEARTBEAT_IDLE_THRESHOLD_MS", "idle_threshold_ms", 0),
+        ("FRONT_HEARTBEAT_FAIL_THRESHOLD", "fail_threshold", 1),
+        ("FRONT_HEARTBEAT_STALE_MULTIPLIER", "stale_multiplier", 1),
+        ("FRONT_HEALTH_CHECK_INTERVAL_MS", "health_check_interval_ms", 1000),
+        ("FRONT_HEALTH_CHECK_JITTER_MS", "health_check_jitter_ms", 0),
+    ):
+        value = optional_env_int(env_name, min_val)
+        if value is not None:
+            heartbeat[key] = value
+    if heartbeat:
+        config["heartbeat"] = heartbeat
+
+    rendering: Dict[str, int] = {}
+    for env_name, key, min_val in (
+        ("FRONT_RESULTS_BATCH_SIZE", "batch_size", 1),
+        ("FRONT_RESULTS_SCROLL_THRESHOLD_PX", "scroll_threshold_px", 0),
+    ):
+        value = optional_env_int(env_name, min_val)
+        if value is not None:
+            rendering[key] = value
+    if rendering:
+        config["rendering"] = rendering
+
+    history: Dict[str, int] = {}
+    value = optional_env_int("FRONT_HISTORY_MAX_ITEMS", 1)
+    if value is not None:
+        history["max_items"] = value
+    if history:
+        config["history"] = history
+
+    range_config: Dict[str, int] = {}
+    for env_name, key, min_val in (
+        ("FRONT_RANGE_MAX", "max", 0),
+        ("FRONT_RANGE_DEFAULT", "default", 0),
+    ):
+        value = optional_env_int(env_name, min_val)
+        if value is not None:
+            range_config[key] = value
+    if range_config:
+        config["range"] = range_config
+
+    search: Dict[str, str] = {}
+    space_mode = optional_env_str("FRONT_SPACE_MODE_DEFAULT")
+    if space_mode:
+        space_mode = space_mode.lower()
+        if space_mode in {"none", "jp", "all"}:
+            search["space_mode_default"] = space_mode
+    normalize_mode = optional_env_str("FRONT_NORMALIZE_MODE_DEFAULT")
+    if normalize_mode:
+        normalize_mode = normalize_mode.lower()
+        if normalize_mode in {"normalized", "exact"}:
+            search["normalize_mode_default"] = normalize_mode
+    if search:
+        config["search"] = search
+
+    return config
+
+
 def heartbeat_ttl_sec() -> int:
     return max(1, env_int("HEARTBEAT_TTL_SEC", DEFAULT_HEARTBEAT_TTL_SEC))
 
@@ -1702,6 +1787,16 @@ async def read_root():
 @app.get("/api/folders")
 async def get_folders():
     return JSONResponse({"folders": describe_folder_state()})
+
+
+@app.get("/api/config")
+async def get_frontend_config():
+    return JSONResponse(
+        {
+            "system_version": SYSTEM_VERSION,
+            "frontend": build_frontend_config(),
+        }
+    )
 
 
 @app.post("/api/heartbeat")
