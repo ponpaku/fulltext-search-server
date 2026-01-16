@@ -37,6 +37,7 @@ const state = {
   clientId: null,
   connectionStatus: 'connecting',
   folderLoadState: 'loading',
+  loadFoldersPromise: null,
 };
 
 // DOM Elements
@@ -598,40 +599,50 @@ const renderFolderList = (folders) => {
 // ═══════════════════════════════════════════════════════════════
 
 const loadFolders = async () => {
-  folderStatusEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
-  folderListEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
-  refreshBtn.disabled = true;
-  state.folderLoadState = 'loading';
-  renderStatusChips();
-
-  try {
-    const res = await fetch('/api/folders');
-    const data = await res.json();
-    state.folders = data.folders || [];
-    state.selected = new Set(state.folders.filter(f => f.ready).map(f => f.id));
-
-    state.folderLoadState = 'ready';
-    renderStatusChips();
-    renderFolderStatus(state.folders);
-    renderFolderList(state.folders);
-    return true;
-  } catch (err) {
-    folderStatusEl.innerHTML = `
-      <div class="status-item error">
-        <span class="status-dot"></span>
-        <div class="status-info">
-          <span class="status-name">エラー</span>
-          <span class="status-detail">フォルダ情報の取得に失敗しました</span>
-        </div>
-      </div>
-    `;
-    state.folderLoadState = 'error';
-    renderStatusChips();
-    console.error(err);
-    return false;
-  } finally {
-    refreshBtn.disabled = false;
+  // If already loading, return existing promise to avoid parallel loads
+  if (state.loadFoldersPromise) {
+    return state.loadFoldersPromise;
   }
+
+  state.loadFoldersPromise = (async () => {
+    folderStatusEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
+    folderListEl.innerHTML = '<div class="loading-placeholder">読み込み中...</div>';
+    refreshBtn.disabled = true;
+    state.folderLoadState = 'loading';
+    renderStatusChips();
+
+    try {
+      const res = await fetch('/api/folders');
+      const data = await res.json();
+      state.folders = data.folders || [];
+      state.selected = new Set(state.folders.filter(f => f.ready).map(f => f.id));
+
+      state.folderLoadState = 'ready';
+      renderStatusChips();
+      renderFolderStatus(state.folders);
+      renderFolderList(state.folders);
+      return true;
+    } catch (err) {
+      folderStatusEl.innerHTML = `
+        <div class="status-item error">
+          <span class="status-dot"></span>
+          <div class="status-info">
+            <span class="status-name">エラー</span>
+            <span class="status-detail">フォルダ情報の取得に失敗しました</span>
+          </div>
+        </div>
+      `;
+      state.folderLoadState = 'error';
+      renderStatusChips();
+      console.error(err);
+      return false;
+    } finally {
+      refreshBtn.disabled = false;
+      state.loadFoldersPromise = null;
+    }
+  })();
+
+  return state.loadFoldersPromise;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -818,7 +829,11 @@ const executeHistorySearch = async (item) => {
 
   // Ensure folders are loaded before restoring selection
   if (!state.folders.length || state.folderLoadState === 'loading') {
-    await loadFolders();
+    const loaded = await loadFolders();
+    if (!loaded) {
+      // loadFolders failed; error is already displayed
+      return;
+    }
   }
 
   // Restore form state
