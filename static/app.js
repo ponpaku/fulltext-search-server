@@ -1,6 +1,6 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.2.0
+ * System Version: 1.3.0
  */
 
 const state = {
@@ -31,6 +31,7 @@ const state = {
   nextCursor: null,
   isLoadingMore: false,
   lastSearchParams: null,
+  searchId: 0,
   filter: {
     folders: new Set(),
     extensions: new Set(),
@@ -1651,11 +1652,20 @@ const appendSearchResults = (payload) => {
 const maybeRequestNextPage = async () => {
   if (state.isLoadingMore || !state.nextCursor) return false;
   state.isLoadingMore = true;
+  const currentSearchId = state.searchId;
   try {
     const data = await fetchSearchPage(state.nextCursor, false);
+    // 検索が切り替わっていたら結果を破棄
+    if (currentSearchId !== state.searchId) {
+      return false;
+    }
     appendSearchResults(data);
     return true;
   } catch (err) {
+    // 検索が切り替わっていたらエラー通知も不要
+    if (currentSearchId !== state.searchId) {
+      return false;
+    }
     showNotice(err.message || '追加取得に失敗しました');
     state.nextCursor = null;
     return false;
@@ -1683,6 +1693,8 @@ const runSearch = async (evt) => {
   }
 
   state.isSearching = true;
+  state.searchId += 1;
+  state.isLoadingMore = false;
   state.lastSearchParams = payload;
   state.totalCount = 0;
   state.nextCursor = null;
