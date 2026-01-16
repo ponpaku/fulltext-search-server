@@ -552,14 +552,15 @@ const renderFolderList = (folders) => {
   }
 
   folderListEl.innerHTML = folders.map(f => {
-    const checked = f.ready ? 'checked' : '';
+    const isSelected = state.selected.has(f.id);
+    const checked = f.ready && isSelected ? 'checked' : '';
     const disabled = f.ready ? '' : 'disabled';
     const fileCount = f.stats?.total_files ? `${f.stats.total_files} ファイル` : '';
     const safeName = escapeHtml(f.name);
     const safePath = escapeHtml(f.displayPath || f.path);
     
     return `
-      <label class="folder-item ${f.ready && state.selected.has(f.id) ? 'selected' : ''}">
+      <label class="folder-item ${f.ready && isSelected ? 'selected' : ''}">
         <input type="checkbox" data-id="${f.id}" ${checked} ${disabled}>
         <div class="folder-info">
           <div class="folder-name">${safeName}</div>
@@ -818,7 +819,8 @@ const executeHistorySearch = async (item) => {
   // Restore form state
   queryInput.value = item.query;
   setMode(item.mode);
-  rangeInput.value = item.range_limit || 0;
+  // ORモードは範囲を復元せず、UIも0にそろえる
+  rangeInput.value = item.mode === 'AND' ? (item.range_limit || 0) : 0;
   spaceModeSelect.value = item.space_mode || 'jp';
   normalizeModeSelect.value = item.normalize_mode || 'exact';
 
