@@ -42,6 +42,9 @@ class AppState:
     normalize_mode_warning_emitted: bool = False
     active_client_heartbeats: Dict[str, float] = field(default_factory=dict)
     active_client_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Warmup state
+    last_search_ts: float = 0.0
+    last_warmup_ts: float = 0.0
 
 
 @dataclass
