@@ -2135,7 +2135,14 @@ async def export_results(req: SearchRequest, format: str = "csv"):
 @app.get("/api/health")
 async def health():
     ready = all(m.get("ready") for m in folder_states.values()) if folder_states else False
-    return {"status": "ok", "ready": ready}
+    return JSONResponse(
+        {"status": "ok", "ready": ready},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 # --- 実行ヘルパー ---
