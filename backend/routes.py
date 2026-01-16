@@ -93,10 +93,17 @@ from .utils import (
     file_id_from_path,
     folder_id_from_path,
     get_ipv4_addresses,
+    is_primary_process,
     log_info,
     log_notice,
     log_success,
     log_warn,
+    process_role,
+)
+from .warmup import (
+    cleanup_old_warmup_locks,
+    keep_warm_loop as warmup_keep_warm_loop,
+    trigger_warmup as warmup_trigger_warmup,
 )
 
 
@@ -509,14 +516,28 @@ async def lifespan(app: FastAPI):
             log_info(f"アクセスURL: {colorize_url(url)}")
 
     announce_task = asyncio.create_task(announce_access_urls())
+    global last_search_ts
+    last_search_ts = time.time()
+    state.last_search_ts = last_search_ts
+    warmup_task = None
+    keepwarm_task = None
+    # Warmup after build_all_indexes (WARMUP_ENABLED defaults to True)
+    if env_bool("WARMUP_ENABLED", True) and is_primary_process():
+        warmup_task = asyncio.create_task(warmup_startup_tasks())
+        keepwarm_task = asyncio.create_task(warmup_keep_warm_loop(state))
     rebuild_fixed_cache()
     schedule_task = asyncio.create_task(schedule_index_rebuild())
     try:
         yield
     finally:
-        for task in (announce_task, schedule_task):
+        for task in (announce_task, schedule_task, warmup_task, keepwarm_task):
+            if task is None:
+                continue
             task.cancel()
-        await asyncio.gather(announce_task, schedule_task, return_exceptions=True)
+        await asyncio.gather(
+            *(task for task in (announce_task, schedule_task, warmup_task, keepwarm_task) if task),
+            return_exceptions=True,
+        )
         if search_executor:
             search_executor.shutdown(wait=True)
 
@@ -568,6 +589,7 @@ file_id_map: Dict[str, Dict[str, str]] = {}
 file_id_lock = threading.RLock()
 active_client_lock = threading.Lock()
 active_client_heartbeats: Dict[str, float] = {}
+last_search_ts = 0.0
 
 state = AppState(
     configured_folders=configured_folders,
@@ -1414,6 +1436,60 @@ def get_active_client_count() -> int:
         return min(len(active_client_heartbeats), max_clients)
 
 
+def mark_search_activity() -> None:
+    global last_search_ts
+    last_search_ts = time.time()
+    state.last_search_ts = last_search_ts
+
+
+def replay_top_queries(reason: str) -> None:
+    if not env_bool("QUERY_REPLAY_ENABLE", False):
+        return
+    if not is_primary_process():
+        return
+    top_k = env_int("QUERY_REPLAY_TOP_K", 10)
+    if top_k <= 0:
+        return
+    prune_query_stats(query_stats)
+    candidates = [v for v in query_stats.values() if v.get("query")]
+    candidates.sort(key=lambda v: v.get("count_total", 0), reverse=True)
+    if not candidates:
+        log_notice(f"クエリ再生スキップ: 対象なし reason={reason}")
+        return
+    role = process_role()
+    log_info(f"クエリ再生開始: reason={reason} role={role} top_k={top_k}")
+    replayed = 0
+    for entry in candidates[:top_k]:
+        target_ids = [
+            fid
+            for fid in entry.get("folders", [])
+            if fid in folder_states and folder_states[fid].get("ready")
+        ]
+        if not target_ids:
+            continue
+        params = SearchParams(
+            entry.get("mode", "AND"),
+            int(entry.get("range", 0)),
+            entry.get("space", "jp"),
+            resolve_normalize_mode(entry.get("normalize")),
+        )
+        try:
+            run_search_direct(entry.get("query", ""), params, target_ids, False)
+            replayed += 1
+        except Exception:
+            continue
+    log_info(f"クエリ再生完了: reason={reason} role={role} replayed={replayed}")
+
+
+async def warmup_startup_tasks() -> None:
+    """Startup warmup tasks: warmup current generation and replay top queries."""
+    gen_name = get_current_generation_pointer()
+    if gen_name:
+        await warmup_trigger_warmup("startup", gen_name)
+        state.last_warmup_ts = time.time()
+    replay_top_queries("startup")
+
+
 def init_search_settings() -> Tuple[int, int, int]:
     budget = total_worker_budget()
     env_conc = os.getenv("SEARCH_CONCURRENCY", "").strip()
@@ -1502,6 +1578,15 @@ async def schedule_index_rebuild():
                     log_info("スケジュール再構築: process を再初期化")
             rebuild_fixed_cache()
             sync_state()
+        # Warmup after generation switch (WARMUP_ENABLED defaults to True)
+        if env_bool("WARMUP_ENABLED", True):
+            gen_name = get_current_generation_pointer()
+            if gen_name:
+                await warmup_trigger_warmup("generation_switch", gen_name)
+                state.last_warmup_ts = time.time()
+            replay_top_queries("generation_switch")
+        # Cleanup old warmup lock files
+        cleanup_old_warmup_locks()
         log_info("スケジュール再構築完了")
 
 
@@ -1820,6 +1905,7 @@ async def search(req: SearchRequest):
             normalize_mode = resolve_normalize_mode(req.normalize_mode)
             params = SearchParams(req.mode, req.range_limit, req.space_mode, normalize_mode)
             cache_key = cache_key_for(req.query, params, target_ids)
+            mark_search_activity()
 
             # キャッシュからの取得を試行
             cached_result = _try_get_memory_cache(cache_key, target_ids, req.query, params)
@@ -1933,6 +2019,7 @@ async def export_results(req: SearchRequest, format: str = "csv"):
 
             normalize_mode = resolve_normalize_mode(req.normalize_mode)
             params = SearchParams(req.mode, req.range_limit, req.space_mode, normalize_mode)
+            mark_search_activity()
             keywords, norm_keyword_groups = build_query_groups(
                 req.query,
                 req.space_mode,
