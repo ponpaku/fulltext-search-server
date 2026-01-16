@@ -18,6 +18,14 @@ const state = {
   groupedResults: null,
   isRenderingBatch: false,
   normalizeMode: 'normalized',
+  totalCount: null,
+  pagination: {
+    limit: 100,
+    nextCursor: null,
+    hasMore: false,
+    loading: false,
+  },
+  lastSearchPayload: null,
   fileModalFolderId: null,
   fileModalFolderName: '',
   fileModalScope: 'indexed',
@@ -105,6 +113,8 @@ const getNormalizeLabel = (mode) => ({
   exact: '厳格（最小整形）',
   normalized: 'ゆらぎ吸収',
 }[mode] || mode);
+
+const SEARCH_PAGE_LIMIT = 100;
 
 // ═══════════════════════════════════════════════════════════════
 // HEARTBEAT
@@ -1298,6 +1308,14 @@ const resetRenderState = () => {
   state.isRenderingBatch = false;
 };
 
+const resetPaginationState = () => {
+  state.pagination.limit = SEARCH_PAGE_LIMIT;
+  state.pagination.nextCursor = null;
+  state.pagination.hasMore = false;
+  state.pagination.loading = false;
+  state.totalCount = null;
+};
+
 const getDisplayResults = () => (
   state.filteredResults ? state.filteredResults : state.results
 );
@@ -1331,32 +1349,37 @@ const appendNextBatch = () => {
   state.isRenderingBatch = false;
 };
 
-const handleResultsScroll = () => {
-  if (!state.results.length || state.isRenderingBatch) return;
-  if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 200) {
+const fillViewport = () => {
+  while (resultsEl.scrollHeight <= resultsEl.clientHeight + 40) {
+    if (state.renderedCount >= currentRenderList().length) break;
     appendNextBatch();
   }
 };
 
-const renderResults = (payload) => {
-  if (payload) {
-    const { results, keywords } = payload;
-    state.results = (results || []).map((item, idx) => ({ ...item, _idx: idx }));
-    state.keywords = keywords || [];
-    state.filteredResults = null;
-    state.filter.folders = new Set();
-    state.filter.extensions = new Set();
-    state.detailCache = new Map();
-    state.detailRequests = new Map();
-    buildFilterOptions();
-    renderFilterOptions();
+const maybeAutoLoadMore = () => {
+  if (!state.pagination.hasMore || state.pagination.loading) return;
+  if (state.renderedCount < currentRenderList().length) return;
+  if (resultsEl.scrollHeight <= resultsEl.clientHeight + 40) {
+    loadMoreResults();
   }
+};
 
+const handleResultsScroll = () => {
+  if (!state.results.length || state.isRenderingBatch) return;
+  if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 200) {
+    appendNextBatch();
+    if (state.pagination.hasMore && !state.pagination.loading && state.renderedCount >= currentRenderList().length) {
+      loadMoreResults();
+    }
+  }
+};
+
+const renderResults = (preserveScroll = false) => {
   updateResultCount();
 
-  // Show/hide export button
   if (exportBtn) {
-    exportBtn.style.display = state.results.length > 0 ? 'inline-flex' : 'none';
+    const total = state.totalCount ?? state.results.length;
+    exportBtn.style.display = total > 0 ? 'inline-flex' : 'none';
   }
 
   if (!state.results.length) {
@@ -1373,22 +1396,31 @@ const renderResults = (payload) => {
     `;
     return;
   }
+  const prevScroll = resultsEl.scrollTop;
   resetRenderState();
   resultsEl.innerHTML = '<div class="results-list"></div>';
   resultsEl.scrollTop = 0;
   appendNextBatch();
-  while (resultsEl.scrollHeight <= resultsEl.clientHeight + 40) {
-    if (state.renderedCount >= currentRenderList().length) break;
-    appendNextBatch();
+  fillViewport();
+  maybeAutoLoadMore();
+  if (preserveScroll) {
+    resultsEl.scrollTop = prevScroll;
   }
 };
 
 const updateResultCount = () => {
-  const total = state.results.length;
+  const loadedTotal = state.results.length;
   const displayCount = getDisplayResults().length;
-  resultCountEl.textContent = state.filteredResults
-    ? `${displayCount} / ${total} 件`
-    : `${total} 件`;
+  const overall = state.totalCount ?? loadedTotal;
+  if (state.filteredResults) {
+    resultCountEl.textContent = `${displayCount} / ${loadedTotal} 件`;
+    return;
+  }
+  if (overall !== loadedTotal) {
+    resultCountEl.textContent = `${loadedTotal} / ${overall} 件`;
+    return;
+  }
+  resultCountEl.textContent = `${loadedTotal} 件`;
 };
 
 const getExtension = (path) => {
@@ -1397,6 +1429,27 @@ const getExtension = (path) => {
   const dotIdx = path.lastIndexOf('.');
   if (dotIdx === -1 || dotIdx < slashIdx) return 'unknown';
   return `.${path.slice(dotIdx + 1).toLowerCase()}`;
+};
+
+const hasActiveFilters = () => (
+  state.filter.folders.size > 0 || state.filter.extensions.size > 0
+);
+
+const refreshFilteredResults = () => {
+  if (!hasActiveFilters()) {
+    state.filteredResults = null;
+    return;
+  }
+  state.filteredResults = state.results.filter((r) => {
+    if (state.filter.folders.size && !state.filter.folders.has(r.folderId || 'unknown')) {
+      return false;
+    }
+    const extKey = getExtension(r.path);
+    if (state.filter.extensions.size && !state.filter.extensions.has(extKey)) {
+      return false;
+    }
+    return true;
+  });
 };
 
 const buildFilterOptions = () => {
@@ -1467,39 +1520,8 @@ const applyFilters = () => {
   });
   state.filter.extensions = selectedExts;
 
-  const hasFolderFilter = state.filter.folders.size > 0;
-  const hasExtFilter = state.filter.extensions.size > 0;
-
-  if (!hasFolderFilter && !hasExtFilter) {
-    state.filteredResults = null;
-  } else {
-    state.filteredResults = state.results.filter((r) => {
-      if (hasFolderFilter && !state.filter.folders.has(r.folderId || 'unknown')) return false;
-      const extKey = getExtension(r.path);
-      if (hasExtFilter && !state.filter.extensions.has(extKey)) return false;
-      return true;
-    });
-  }
-
-  updateResultCount();
-  if (!getDisplayResults().length) {
-    resultsEl.innerHTML = `
-      <div class="empty-state">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <circle cx="11" cy="11" r="8"/>
-          <path d="m21 21-4.35-4.35"/>
-          <path d="M8 11h6"/>
-        </svg>
-        <p class="empty-title">一致なし</p>
-        <p class="empty-sub">フィルタ条件を見直してください。</p>
-      </div>
-    `;
-    return;
-  }
-  resetRenderState();
-  resultsEl.innerHTML = '<div class="results-list"></div>';
-  resultsEl.scrollTop = 0;
-  appendNextBatch();
+  refreshFilteredResults();
+  renderResults();
 };
 
 const clearFilters = () => {
@@ -1507,30 +1529,91 @@ const clearFilters = () => {
   state.filter.extensions = new Set();
   state.filteredResults = null;
   renderFilterOptions();
-  updateResultCount();
-  if (!state.results.length) {
-    resultsEl.innerHTML = `
-      <div class="empty-state">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <circle cx="11" cy="11" r="8"/>
-          <path d="m21 21-4.35-4.35"/>
-          <path d="M8 11h6"/>
-        </svg>
-        <p class="empty-title">一致なし</p>
-        <p class="empty-sub">別のキーワードやフォルダでお試しください。</p>
-      </div>
-    `;
-    return;
-  }
-  resetRenderState();
-  resultsEl.innerHTML = '<div class="results-list"></div>';
-  resultsEl.scrollTop = 0;
-  appendNextBatch();
+  renderResults();
 };
 
 // ═══════════════════════════════════════════════════════════════
 // SEARCH
 // ═══════════════════════════════════════════════════════════════
+
+const applySearchPayload = (payload) => {
+  const items = payload.items || payload.results || [];
+  state.results = items.map((item, idx) => ({ ...item, _idx: idx }));
+  state.keywords = payload.keywords || [];
+  state.filteredResults = null;
+  state.filter.folders = new Set();
+  state.filter.extensions = new Set();
+  state.detailCache = new Map();
+  state.detailRequests = new Map();
+  state.totalCount = Number.isFinite(payload.count) ? payload.count : items.length;
+  state.pagination.nextCursor = payload.next_cursor || null;
+  state.pagination.hasMore = Boolean(payload.next_cursor);
+  state.pagination.loading = false;
+  buildFilterOptions();
+  renderFilterOptions();
+};
+
+const appendSearchPayload = (payload) => {
+  const items = payload.items || [];
+  if (!items.length) {
+    state.pagination.nextCursor = null;
+    state.pagination.hasMore = false;
+    state.pagination.loading = false;
+    return;
+  }
+  const startIdx = state.results.length;
+  const additions = items.map((item, idx) => ({ ...item, _idx: startIdx + idx }));
+  state.results = state.results.concat(additions);
+  if (Number.isFinite(payload.count)) {
+    state.totalCount = payload.count;
+  }
+  state.pagination.nextCursor = payload.next_cursor || null;
+  state.pagination.hasMore = Boolean(payload.next_cursor);
+  state.pagination.loading = false;
+  refreshFilteredResults();
+  state.groupedResults = null;
+  buildFilterOptions();
+  renderFilterOptions();
+  if (state.viewMode === 'file' || state.filteredResults) {
+    renderResults(true);
+  } else {
+    appendNextBatch();
+    fillViewport();
+    maybeAutoLoadMore();
+  }
+};
+
+const requestSearchPage = async (cursor = null) => {
+  if (!state.lastSearchPayload) {
+    throw new Error('検索条件が取得できませんでした');
+  }
+  const payload = { ...state.lastSearchPayload, limit: SEARCH_PAGE_LIMIT };
+  if (cursor) {
+    payload.cursor = cursor;
+  }
+  const res = await fetch('/api/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || '検索に失敗しました');
+  }
+  return res.json();
+};
+
+const loadMoreResults = async () => {
+  if (state.pagination.loading || !state.pagination.hasMore) return;
+  state.pagination.loading = true;
+  try {
+    const data = await requestSearchPage(state.pagination.nextCursor);
+    appendSearchPayload(data);
+  } catch (err) {
+    console.error(err);
+    state.pagination.loading = false;
+  }
+};
 
 const runSearch = async (evt) => {
   evt?.preventDefault();
@@ -1547,9 +1630,11 @@ const runSearch = async (evt) => {
     space_mode: spaceMode,
     normalize_mode: normalizeMode,
     folders: Array.from(state.selected),
+    limit: SEARCH_PAGE_LIMIT,
   };
   state.spaceMode = spaceMode;
   state.normalizeMode = normalizeMode;
+  state.lastSearchPayload = { ...payload };
 
   if (!payload.query) {
     alert('キーワードを入力してください');
@@ -1562,6 +1647,8 @@ const runSearch = async (evt) => {
   }
 
   state.isSearching = true;
+  resetPaginationState();
+  state.pagination.loading = true;
   resultsEl.innerHTML = `
     <div class="loading-state">
       <div class="loading-spinner"></div>
@@ -1570,16 +1657,7 @@ const runSearch = async (evt) => {
   `;
 
   try {
-    const res = await fetch('/api/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || '検索に失敗しました');
-    }
-    const data = await res.json();
+    const data = await requestSearchPage();
 
     // Save to query history
     state.currentIndexUuid = data.index_uuid || null;
@@ -1608,7 +1686,8 @@ const runSearch = async (evt) => {
       }
     }
 
-    renderResults(data);
+    applySearchPayload(data);
+    renderResults();
   } catch (err) {
     resultsEl.innerHTML = `
       <div class="empty-state">
@@ -1623,6 +1702,7 @@ const runSearch = async (evt) => {
     console.error(err);
   } finally {
     state.isSearching = false;
+    state.pagination.loading = false;
   }
 };
 
@@ -1697,7 +1777,8 @@ document.addEventListener('keydown', (e) => {
 // Export button
 if (exportBtn) {
   exportBtn.addEventListener('click', async () => {
-    if (!state.results.length) {
+    const total = state.totalCount ?? state.results.length;
+    if (!total) {
       alert('エクスポートする検索結果がありません');
       return;
     }
