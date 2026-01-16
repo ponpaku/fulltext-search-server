@@ -1,6 +1,6 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.3.0
+ * System Version: 1.3.1
  */
 
 const state = {

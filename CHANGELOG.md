@@ -1,6 +1,10 @@
 # 変更履歴
 
-System Version: 1.3.0
+System Version: 1.3.1
+
+## 1.3.1
+
+- 2026-01-18: 追加: `/api/config` の system_version をヘッダーに表示。
 
 ## 1.3.0
 

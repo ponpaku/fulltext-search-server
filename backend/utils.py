@@ -10,7 +10,7 @@ import subprocess
 import time
 from typing import List
 
-SYSTEM_VERSION = "1.3.0"
+SYSTEM_VERSION = "1.3.1"
 
 try:
     from colorama import Fore, Style, init as colorama_init

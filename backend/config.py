@@ -9,7 +9,7 @@ from dotenv import load_dotenv, find_dotenv
 
 from .utils import log_warn
 
-SYSTEM_VERSION = "1.3.0"
+SYSTEM_VERSION = "1.3.1"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BASE_DIR = PROJECT_ROOT

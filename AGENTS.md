@@ -1,5 +1,5 @@
 # System Overview
-System Version: 1.3.0
+System Version: 1.3.1
 
 - Stack: FastAPI backend with a static UI (`static/`) and in-memory search data.
 - Inputs: folders from `SEARCH_FOLDERS`; optional SMB path parsing and display aliases via `SEARCH_FOLDER_ALIASES`.

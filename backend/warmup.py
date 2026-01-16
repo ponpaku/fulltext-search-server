@@ -15,7 +15,7 @@ from .utils import env_bool, env_int, is_primary_process, log_info, log_notice, 
 if TYPE_CHECKING:
     from .context import AppState
 
-SYSTEM_VERSION = "1.3.0"
+SYSTEM_VERSION = "1.3.1"
 
 # Module-level state
 _last_warmup_ts: float = 0.0
