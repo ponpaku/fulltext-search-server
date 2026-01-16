@@ -26,6 +26,11 @@ const state = {
   currentIndexUuid: null,
   detailCache: new Map(),
   detailRequests: new Map(),
+  pageSize: 100,
+  totalCount: 0,
+  nextCursor: null,
+  isLoadingMore: false,
+  lastSearchParams: null,
   filter: {
     folders: new Set(),
     extensions: new Set(),
@@ -1314,7 +1319,16 @@ const currentRenderList = () => {
 const appendNextBatch = () => {
   if (state.isRenderingBatch) return;
   const list = currentRenderList();
-  if (state.renderedCount >= list.length) return;
+  if (state.renderedCount >= list.length) {
+    if (state.nextCursor && !state.isLoadingMore) {
+      void maybeRequestNextPage().then(() => {
+        if (state.renderedCount < currentRenderList().length) {
+          appendNextBatch();
+        }
+      });
+    }
+    return;
+  }
   state.isRenderingBatch = true;
   const start = state.renderedCount;
   const end = Math.min(start + 100, list.length);
@@ -1377,18 +1391,33 @@ const renderResults = (payload) => {
   resultsEl.innerHTML = '<div class="results-list"></div>';
   resultsEl.scrollTop = 0;
   appendNextBatch();
-  while (resultsEl.scrollHeight <= resultsEl.clientHeight + 40) {
-    if (state.renderedCount >= currentRenderList().length) break;
-    appendNextBatch();
-  }
+  const ensureViewportFilled = async () => {
+    while (resultsEl.scrollHeight <= resultsEl.clientHeight + 40) {
+      if (state.renderedCount < currentRenderList().length) {
+        appendNextBatch();
+        continue;
+      }
+      if (state.nextCursor) {
+        const loaded = await maybeRequestNextPage();
+        if (!loaded) break;
+        continue;
+      }
+      break;
+    }
+  };
+  void ensureViewportFilled();
 };
 
 const updateResultCount = () => {
-  const total = state.results.length;
+  const total = state.totalCount || state.results.length;
   const displayCount = getDisplayResults().length;
-  resultCountEl.textContent = state.filteredResults
-    ? `${displayCount} / ${total} 件`
-    : `${total} 件`;
+  if (state.filteredResults) {
+    resultCountEl.textContent = `${displayCount} / ${total} 件`;
+  } else if (total !== state.results.length) {
+    resultCountEl.textContent = `${state.results.length} / ${total} 件`;
+  } else {
+    resultCountEl.textContent = `${total} 件`;
+  }
 };
 
 const getExtension = (path) => {
@@ -1454,6 +1483,26 @@ const renderFilterOptions = () => {
   filterExtensionsEl.innerHTML = extHtml;
 };
 
+const matchesFilters = (result) => {
+  const hasFolderFilter = state.filter.folders.size > 0;
+  const hasExtFilter = state.filter.extensions.size > 0;
+  if (!hasFolderFilter && !hasExtFilter) return true;
+  if (hasFolderFilter && !state.filter.folders.has(result.folderId || 'unknown')) return false;
+  const extKey = getExtension(result.path);
+  if (hasExtFilter && !state.filter.extensions.has(extKey)) return false;
+  return true;
+};
+
+const syncFilteredResults = () => {
+  const hasFolderFilter = state.filter.folders.size > 0;
+  const hasExtFilter = state.filter.extensions.size > 0;
+  if (!hasFolderFilter && !hasExtFilter) {
+    state.filteredResults = null;
+    return;
+  }
+  state.filteredResults = state.results.filter(matchesFilters);
+};
+
 const applyFilters = () => {
   const selectedFolders = new Set();
   filterFoldersEl?.querySelectorAll('input[type="checkbox"]:checked').forEach((el) => {
@@ -1467,19 +1516,7 @@ const applyFilters = () => {
   });
   state.filter.extensions = selectedExts;
 
-  const hasFolderFilter = state.filter.folders.size > 0;
-  const hasExtFilter = state.filter.extensions.size > 0;
-
-  if (!hasFolderFilter && !hasExtFilter) {
-    state.filteredResults = null;
-  } else {
-    state.filteredResults = state.results.filter((r) => {
-      if (hasFolderFilter && !state.filter.folders.has(r.folderId || 'unknown')) return false;
-      const extKey = getExtension(r.path);
-      if (hasExtFilter && !state.filter.extensions.has(extKey)) return false;
-      return true;
-    });
-  }
+  syncFilteredResults();
 
   updateResultCount();
   if (!getDisplayResults().length) {
@@ -1532,15 +1569,12 @@ const clearFilters = () => {
 // SEARCH
 // ═══════════════════════════════════════════════════════════════
 
-const runSearch = async (evt) => {
-  evt?.preventDefault();
-  if (state.isSearching) return;
-
+const buildSearchParams = () => {
   const query = queryInput.value.trim();
   const rangeVal = parseInt(rangeInput.value || '0', 10);
   const spaceMode = spaceModeSelect?.value || 'jp';
   const normalizeMode = normalizeModeSelect?.value || 'normalized';
-  const payload = {
+  return {
     query,
     mode: state.mode,
     range_limit: state.mode === 'AND' ? rangeVal : 0,
@@ -1548,8 +1582,95 @@ const runSearch = async (evt) => {
     normalize_mode: normalizeMode,
     folders: Array.from(state.selected),
   };
-  state.spaceMode = spaceMode;
-  state.normalizeMode = normalizeMode;
+};
+
+const fetchSearchPage = async (cursor, includeTotal) => {
+  if (!state.lastSearchParams) {
+    throw new Error('検索条件がありません');
+  }
+  const payload = {
+    ...state.lastSearchParams,
+    limit: state.pageSize,
+    cursor: cursor || null,
+    include_total: includeTotal,
+    return_all: false,
+  };
+  const res = await fetch('/api/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || '検索に失敗しました');
+  }
+  return res.json();
+};
+
+const initializeResults = (payload) => {
+  const { results, keywords, next_cursor: nextCursor } = payload;
+  state.results = (results || []).map((item, idx) => ({ ...item, _idx: idx }));
+  state.keywords = keywords || [];
+  state.filteredResults = null;
+  state.filter.folders = new Set();
+  state.filter.extensions = new Set();
+  state.groupedResults = null;
+  state.detailCache = new Map();
+  state.detailRequests = new Map();
+  state.nextCursor = nextCursor || null;
+  state.totalCount = payload.count ?? state.results.length;
+  buildFilterOptions();
+  renderFilterOptions();
+};
+
+const appendSearchResults = (payload) => {
+  const { results, next_cursor: nextCursor } = payload;
+  const startIdx = state.results.length;
+  const newItems = (results || []).map((item, idx) => ({ ...item, _idx: startIdx + idx }));
+  if (!newItems.length) {
+    state.nextCursor = nextCursor || null;
+    return;
+  }
+  state.results.push(...newItems);
+  state.nextCursor = nextCursor || null;
+  state.groupedResults = null;
+  if (state.filteredResults) {
+    state.filteredResults.push(...newItems.filter(matchesFilters));
+  }
+  if (typeof payload.count === 'number') {
+    state.totalCount = payload.count;
+  }
+  buildFilterOptions();
+  renderFilterOptions();
+  updateResultCount();
+  if (state.viewMode === 'file') {
+    renderResults();
+  }
+};
+
+const maybeRequestNextPage = async () => {
+  if (state.isLoadingMore || !state.nextCursor) return false;
+  state.isLoadingMore = true;
+  try {
+    const data = await fetchSearchPage(state.nextCursor, false);
+    appendSearchResults(data);
+    return true;
+  } catch (err) {
+    showNotice(err.message || '追加取得に失敗しました');
+    state.nextCursor = null;
+    return false;
+  } finally {
+    state.isLoadingMore = false;
+  }
+};
+
+const runSearch = async (evt) => {
+  evt?.preventDefault();
+  if (state.isSearching) return;
+
+  const payload = buildSearchParams();
+  state.spaceMode = payload.space_mode;
+  state.normalizeMode = payload.normalize_mode;
 
   if (!payload.query) {
     alert('キーワードを入力してください');
@@ -1562,6 +1683,9 @@ const runSearch = async (evt) => {
   }
 
   state.isSearching = true;
+  state.lastSearchParams = payload;
+  state.totalCount = 0;
+  state.nextCursor = null;
   resultsEl.innerHTML = `
     <div class="loading-state">
       <div class="loading-spinner"></div>
@@ -1570,36 +1694,27 @@ const runSearch = async (evt) => {
   `;
 
   try {
-    const res = await fetch('/api/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || '検索に失敗しました');
-    }
-    const data = await res.json();
+    const data = await fetchSearchPage(null, true);
 
     // Save to query history
     state.currentIndexUuid = data.index_uuid || null;
-    const effectiveNormalize = data.normalize_mode || normalizeMode;
+    const effectiveNormalize = data.normalize_mode || payload.normalize_mode;
     if (normalizeModeSelect && data.normalize_mode && data.normalize_mode !== normalizeModeSelect.value) {
       normalizeModeSelect.value = data.normalize_mode;
     }
     addToQueryHistory(
-      query,
+      payload.query,
       state.mode,
-      rangeVal,
-      spaceMode,
+      payload.range_limit,
+      payload.space_mode,
       effectiveNormalize,
       payload.folders,
       data.count || 0,
       state.currentIndexUuid
     );
 
-    if (data.normalize_mode && data.normalize_mode !== normalizeMode) {
-      const requestedLabel = getNormalizeLabel(normalizeMode);
+    if (data.normalize_mode && data.normalize_mode !== payload.normalize_mode) {
+      const requestedLabel = getNormalizeLabel(payload.normalize_mode);
       const effectiveLabel = getNormalizeLabel(data.normalize_mode);
       const message = `表記ゆれ: ${requestedLabel} → ${effectiveLabel}`;
       if (message !== lastNormalizeNotice) {
@@ -1608,7 +1723,8 @@ const runSearch = async (evt) => {
       }
     }
 
-    renderResults(data);
+    initializeResults(data);
+    renderResults();
   } catch (err) {
     resultsEl.innerHTML = `
       <div class="empty-state">
