@@ -7,7 +7,7 @@ from typing import Dict, List, Any
 
 from dotenv import load_dotenv, find_dotenv
 
-from backend.utils import log_warn
+from .utils import log_warn
 
 SYSTEM_VERSION = "1.2.0"
 
