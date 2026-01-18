@@ -15,7 +15,7 @@ from pdfminer.pdfpage import PDFPage
 from .text_utils import split_non_pdf_text
 from .utils import log_warn
 
-SYSTEM_VERSION = "1.2.0"
+SYSTEM_VERSION = "1.3.0"
 
 
 def read_text_file_safe(path: str) -> str:
