@@ -1,6 +1,6 @@
 # Full-Search-PDFs
 
-System Version: 1.2.0
+System Version: 1.3.0
 
 ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。
 UI は `static/` 配下で提供されます。
@@ -66,7 +66,7 @@ chmod +x run.sh
 （運用で即時切替したい値は `.env` 側で上書きできます。`.env` に空値 `VAR=` を指定した場合は未設定として扱われ、config.json の値が適用されます。）
 
 #### 旧バージョンからの移行
-1.2.0 以前で `.env` に記載していた設定項目（`SEARCH_FOLDERS`, `SEARCH_FOLDER_ALIASES` など）は `config.json` へ移管してください。
+1.2.x 以前で `.env` に記載していた設定項目（`SEARCH_FOLDERS`, `SEARCH_FOLDER_ALIASES` など）は `config.json` へ移管してください。
 運用中に一時的に値を変えたい場合のみ `.env` を利用します。
 
 ```json

@@ -1,8 +1,8 @@
 # 変更履歴
 
-System Version: 1.2.0
+System Version: 1.3.0
 
-## 1.2.1
+## 1.3.0
 
 - 2026-01-16: 改善: 設定を config.json と .env に分離し、config.json を必須化。
   - `CONFIG_PATH` で config.json の位置を指定可能
