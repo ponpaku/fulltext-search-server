@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(rm:*)",
+      "Bash(curl:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(pkill:*)",
+      "Bash(true)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(mkdir:*)",
+      "Bash(mv:*)",
+      "WebFetch(domain:support.google.com)",
+      "WebFetch(domain:www.xserver.ne.jp)",
+      "WebFetch(domain:www.radix-ui.com)",
+      "WebFetch(domain:stackoverflow.com)",
+      "WebFetch",
+      "Bash(chmod:*)",
+      "WebSearch",
+      "Bash(python3 -m py_compile:*)",
+      "Bash(python -m py_compile:*)"
+    ],
+    "deny": []
+  }
+}

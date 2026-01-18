@@ -38,6 +38,7 @@ const state = {
   connectionStatus: 'connecting',
   folderLoadState: 'loading',
   loadFoldersPromise: null,
+  systemVersion: null,
 };
 
 // DOM Elements
@@ -192,6 +193,12 @@ const mergeFrontendConfig = (payload) => {
   }
 };
 
+const normalizeSystemVersion = (value) => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+};
+
 const loadFrontendConfig = async () => {
   try {
     const res = await fetch(`/api/config?ts=${Date.now()}`);
@@ -200,6 +207,11 @@ const loadFrontendConfig = async () => {
       return false;
     }
     const payload = await res.json();
+    const version = normalizeSystemVersion(payload?.system_version);
+    if (version) {
+      state.systemVersion = version;
+      renderStatusChips();
+    }
     const configPayload = payload?.frontend || payload?.config || payload;
     mergeFrontendConfig(configPayload);
     return true;
@@ -588,7 +600,16 @@ const renderStatusChips = () => {
   const ready = state.folders.filter(f => f.ready).length;
   const connectionChip = getConnectionChip();
   const folderChip = getFolderStatusChip(total, ready);
-  statusChips.innerHTML = `${connectionChip}${folderChip}`;
+  const versionChip = getVersionChip();
+  statusChips.innerHTML = `${connectionChip}${folderChip}${versionChip}`;
+};
+
+const getVersionChip = () => {
+  if (!state.systemVersion) return '';
+  const trimmed = state.systemVersion.trim();
+  if (!trimmed) return '';
+  const label = trimmed.startsWith('v') ? trimmed : `v${trimmed}`;
+  return `<span class="chip subtle">${escapeHtml(label)}</span>`;
 };
 
 const getConnectionChip = () => {
