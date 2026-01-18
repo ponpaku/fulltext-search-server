@@ -1,6 +1,6 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.2.0
+ * System Version: 1.3.0
  */
 
 const state = {
@@ -634,7 +634,7 @@ const renderFolderStatus = (folders) => {
         <span class="status-dot"></span>
         <div class="status-info">
           <span class="status-name">未設定</span>
-          <span class="status-detail">.env で SEARCH_FOLDERS を設定してください</span>
+          <span class="status-detail">config.json の search.folders を設定してください</span>
         </div>
       </div>
     `;

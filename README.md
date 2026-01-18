@@ -1,6 +1,6 @@
 # Full-Search-PDFs
 
-System Version: 1.2.0
+System Version: 1.3.0
 
 ローカル/社内フォルダ内の PDF/Office 文書を全文検索する FastAPI アプリです。
 UI は `static/` 配下で提供されます。
@@ -56,93 +56,101 @@ chmod +x run.sh
   - 引数の追加: `/k ""C:\path\to\run.bat""`
   - 開始（オプション）: `C:\path\to\`（run.bat のフォルダ）
 
-## 設定（.env）
+## 設定
+### config.json（アプリ設定）
+`config.example.json` をコピーして `config.json` を作成し、アプリ設定を記載してください。
+`config.json` が見つからない場合は起動を停止します。
+保存場所を変える場合は `.env` の `CONFIG_PATH` を利用してください。
+
+**優先順位**: `.env / OS環境変数` > `config.json` > 既定値
+（運用で即時切替したい値は `.env` 側で上書きできます。`.env` に空値 `VAR=` を指定した場合は未設定として扱われ、config.json の値が適用されます。）
+
+#### 旧バージョンからの移行
+1.2.x 以前で `.env` に記載していた設定項目（`SEARCH_FOLDERS`, `SEARCH_FOLDER_ALIASES` など）は `config.json` へ移管してください。
+運用中に一時的に値を変えたい場合のみ `.env` を利用します。
+
+```json
+{
+  "search": {
+    "folders": [
+      {"label": "規程", "path": "C:\\\\path\\\\to\\\\folder1"},
+      {"label": "議事録", "path": "//192.168.0.10/share/folder2"}
+    ],
+    "folder_aliases": {
+      "192.168.0.10": "share"
+    },
+    "execution_mode": "thread",
+    "process_shared": true,
+    "cpu_budget": 6,
+    "concurrency": 6,
+    "workers": 6
+  },
+  "front": {
+    "results_batch_size": 100,
+    "range_default": 0,
+    "space_mode_default": "jp",
+    "normalize_mode_default": "normalized"
+  },
+  "query": {
+    "normalize": "nfkc_casefold"
+  },
+  "query_stats": {
+    "ttl_days": 30,
+    "flush_sec": 60
+  },
+  "cache": {
+    "fixed_min_count": 10,
+    "fixed_min_time_ms": 500,
+    "fixed_min_hits": 5000,
+    "fixed_min_kb": 2000,
+    "fixed_ttl_days": 7,
+    "fixed_max_entries": 20,
+    "fixed_trigger_cooldown_sec": 300,
+    "mem_max_mb": 200,
+    "mem_max_entries": 200,
+    "mem_max_result_kb": 2000,
+    "compress_min_kb": 2000
+  },
+  "rebuild": {
+    "schedule": "03:00",
+    "allow_shrink": true
+  },
+  "index": {
+    "keep_generations": 3,
+    "keep_days": 30,
+    "max_bytes": 0,
+    "cleanup_grace_sec": 300,
+    "store_normalized": true
+  },
+  "diff": {
+    "mode": "stat",
+    "fast_fp_bytes": 65536,
+    "full_hash_algo": "sha256",
+    "full_hash_paths": ["D:\\\\share\\\\secure", "\\\\\\\\NAS\\\\docs"],
+    "full_hash_exts": [".pdf", ".docx"]
+  }
+}
+```
+
+### .env（運用依存/秘密情報/一時切替）
 ```env
-# 検索対象フォルダ（ラベル=パス、1行で指定）
-# Windowsは C:\Users\... をそのまま記載可（\ のエスケープ不要）
-SEARCH_FOLDERS="規程=C:\data\docs,議事録=//192.168.30.10/share/minutes"
-# 複数行に分割する設定は非対応（最初の1行のみ読み取り）
-# OS環境変数が設定済みの場合はそちらが優先されます
-
-# NAS名表示用（表示のみ）
-SEARCH_FOLDER_ALIASES="192.168.30.10=landisk-fukyo"
-
-# 検索同時実行数（デフォルト: CPU数）
-SEARCH_CONCURRENCY=6
-
-# 1検索あたりの並列ワーカー数（省略時は自動計算）
-SEARCH_WORKERS=6
-
-# CPUコア数の上書き（開発機と本番機が違う場合）
-SEARCH_CPU_BUDGET=6
-
-# ハートビートのTTL（アクティブ判定、秒）
-HEARTBEAT_TTL_SEC=90
-
-# アクティブクライアント数の上限（未指定ならワーカー予算に準拠）
-HEARTBEAT_MAX_CLIENTS=6
-
-# フロント向け設定（/api/config で返却、未指定ならUIデフォルト）
-FRONT_HEARTBEAT_INTERVAL_MS=35000
-FRONT_HEARTBEAT_JITTER_MS=10000
-FRONT_HEARTBEAT_MIN_GAP_MS=5000
-FRONT_HEARTBEAT_INTERACTION_GAP_MS=15000
-FRONT_HEARTBEAT_IDLE_THRESHOLD_MS=90000
-FRONT_HEARTBEAT_FAIL_THRESHOLD=2
-FRONT_HEARTBEAT_STALE_MULTIPLIER=2
-FRONT_HEALTH_CHECK_INTERVAL_MS=5000
-FRONT_HEALTH_CHECK_JITTER_MS=3000
-FRONT_RESULTS_BATCH_SIZE=100
-FRONT_RESULTS_SCROLL_THRESHOLD_PX=200
-FRONT_HISTORY_MAX_ITEMS=30
-FRONT_RANGE_MAX=5000
-FRONT_RANGE_DEFAULT=0
-FRONT_SPACE_MODE_DEFAULT=jp
-FRONT_NORMALIZE_MODE_DEFAULT=normalized
-
-# 検索実行モード（thread/process）
-SEARCH_EXECUTION_MODE=thread
+# 起動ポートを変えたい場合のみ指定（デフォルト: 80）
+# PORT=80
 
 # SSL 証明書ディレクトリ（lan-cert.pem / lan-key.pem）
-CERT_DIR="certs"
+# CERT_DIR="certs"
 
-# クエリ統計の保持期間（日）
-QUERY_STATS_TTL_DAYS=30
+# デバッグログを有効化（1/0）
+# SEARCH_DEBUG=1
 
-# クエリ統計の保存間隔（秒）
-QUERY_STATS_FLUSH_SEC=60
+# config.json のパス（デフォルト: ./config.json）
+# CONFIG_PATH="config.json"
 
-# 固定キャッシュの条件（頻度・重さ）
-CACHE_FIXED_MIN_COUNT=10
-CACHE_FIXED_MIN_TIME_MS=500
-CACHE_FIXED_MIN_HITS=5000
-CACHE_FIXED_MIN_KB=2000
+# 検索実行モード（thread/process）
+# SEARCH_EXECUTION_MODE=thread
 
-# 固定キャッシュの維持期間（日）
-CACHE_FIXED_TTL_DAYS=7
-
-# 固定キャッシュの最大件数
-CACHE_FIXED_MAX_ENTRIES=20
-
-# 固定キャッシュの自動再構築の間隔（秒）
-CACHE_FIXED_TRIGGER_COOLDOWN_SEC=300
-
-# メモリキャッシュの上限
-CACHE_MEM_MAX_MB=200
-CACHE_MEM_MAX_ENTRIES=200
-CACHE_MEM_MAX_RESULT_KB=2000
-
-# 固定キャッシュの圧縮閾値（KB以上はgzip保存）
-CACHE_COMPRESS_MIN_KB=2000
-
-# クエリ正規化モード（off/nfkc_casefold） ※推奨: nfkc_casefold
-QUERY_NORMALIZE=nfkc_casefold
-
-# インデックスに正規化済みテキストを保持（0/1） ※推奨: 1
-INDEX_STORE_NORMALIZED=1
-
-# インデックス再構築スケジュール（例: 03:00 or 12h）
-REBUILD_SCHEDULE="03:00"
+# processモードで共有メモリ(mmap)を使うか（デフォルト: 1）
+# SEARCH_PROCESS_SHARED=1
 ```
 
 ## インデックス

@@ -6,7 +6,7 @@ from typing import Dict, List
 
 from .config import AppConfig
 
-SYSTEM_VERSION = "1.2.0"
+SYSTEM_VERSION = "1.3.0"
 
 
 @dataclass

@@ -1,9 +1,15 @@
 # 変更履歴
 
-System Version: 1.2.0
+System Version: 1.3.0
 
-## 1.2.1
+## 1.3.0
 
+- 2026-01-16: 改善: 設定を config.json と .env に分離し、config.json を必須化。
+  - `CONFIG_PATH` で config.json の位置を指定可能
+  - env → config.json → 既定値の優先順位で読み込み
+  - config.json 不在時は案内メッセージを表示して起動停止（自動コピー廃止）
+  - `.env` の空値 `VAR=` を「未設定」として扱い、config.json で補完可能に
+- 2026-01-16: 更新: README と UI の設定ガイドを config.json 前提に整理。
 - 2026-01-16: 追加: `/api/config` でフロント向け設定（ハートビート/履歴/描画バッチ/検索初期値）を返却し、UI側で取得して反映可能に。
 - 2026-01-16: 修正: `/api/health` にキャッシュ無効化ヘッダーを追加。
 - 2026-01-15: 改善: heartbeat 失敗時に health へ切り替えて復帰待ちし、復帰後に folders を再取得して heartbeat を再開する接続監視フローを追加。
