@@ -1492,6 +1492,10 @@ const appendNextBatch = () => {
   const end = Math.min(start + uiConfig.rendering.batchSize, list.length);
   const slice = list.slice(start, end);
   const listEl = resultsEl.querySelector('.results-list');
+  if (!listEl) {
+    state.isRenderingBatch = false;
+    return;
+  }
   const html = state.viewMode === 'file'
     ? renderFileCards(slice)
     : renderHitCards(slice);
@@ -1504,7 +1508,9 @@ const appendNextBatch = () => {
 };
 
 const handleResultsScroll = () => {
-  if (!state.results.length || state.isRenderingBatch) return;
+  const displayResults = getDisplayResults();
+  if (!displayResults.length || state.isRenderingBatch) return;
+  if (!resultsEl.querySelector('.results-list')) return;
   if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - uiConfig.rendering.scrollThresholdPx) {
     appendNextBatch();
   }
