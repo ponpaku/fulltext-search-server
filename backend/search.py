@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import mmap
 import os
+import signal
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple
@@ -447,6 +448,7 @@ def build_memory_pages(folder_id: str, folder_name: str, cache: Dict[str, Dict])
 
 
 def init_search_worker(folder_snapshot: List[Dict], aliases: Dict[str, str]):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     global WORKER_MEMORY_PAGES, WORKER_FOLDER_META, host_aliases
     host_aliases = aliases
     pages_map: Dict[str, List[Dict]] = {}
@@ -463,6 +465,7 @@ def init_search_worker(folder_snapshot: List[Dict], aliases: Dict[str, str]):
 
 
 def init_search_worker_shared(folder_snapshot: List[Dict], aliases: Dict[str, str]):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     global WORKER_SHARED_ENTRIES, WORKER_SHARED_MM, WORKER_SHARED_FILES, host_aliases, PROCESS_SHARED
     host_aliases = aliases
     PROCESS_SHARED = True

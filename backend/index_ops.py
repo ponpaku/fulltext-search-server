@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import pickle
+import signal
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -22,6 +23,10 @@ from .extractors import extract_text_from_file_with_reason
 from .utils import env_bool, env_int, log_info, log_notice, log_warn
 
 SYSTEM_VERSION = "1.3.1"
+
+
+def _ignore_sigint_in_worker() -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
 def create_generation_uuid() -> str:
@@ -808,7 +813,9 @@ def build_index_for_folder(
     if targets:
         max_workers = max(1, os.cpu_count() or 4)
         log_info(f"インデックス更新開始: {folder} 対象={len(targets)} workers={max_workers}")
-        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+        with ProcessPoolExecutor(
+            max_workers=max_workers, initializer=_ignore_sigint_in_worker
+        ) as pool:
             future_to_path = {
                 pool.submit(extract_text_from_file_with_reason, str(p)): str(p) for p in targets
             }
