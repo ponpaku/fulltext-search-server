@@ -1,6 +1,6 @@
 /**
  * フォルダ内テキスト検索 — YomiToku Style
- * System Version: 1.3.1
+ * System Version: 1.2.0
  */
 
 const state = {
@@ -38,7 +38,6 @@ const state = {
   connectionStatus: 'connecting',
   folderLoadState: 'loading',
   loadFoldersPromise: null,
-  systemVersion: null,
 };
 
 // DOM Elements
@@ -108,148 +107,20 @@ const getNormalizeLabel = (mode) => ({
 }[mode] || mode);
 
 // ═══════════════════════════════════════════════════════════════
-// FRONTEND CONFIG
-// ═══════════════════════════════════════════════════════════════
-
-const DEFAULT_UI_CONFIG = Object.freeze({
-  heartbeat: {
-    intervalMs: 35000,
-    jitterMs: 10000,
-    minGapMs: 5000,
-    interactionGapMs: 15000,
-    idleThresholdMs: 90000,
-    failThreshold: 2,
-    staleMultiplier: 2,
-    healthCheckIntervalMs: 5000,
-    healthCheckJitterMs: 3000,
-  },
-  rendering: {
-    batchSize: 100,
-    scrollThresholdPx: 200,
-  },
-  history: {
-    maxItems: 30,
-  },
-  range: {
-    max: 5000,
-    defaultValue: 0,
-  },
-  search: {
-    spaceModeDefault: 'jp',
-    normalizeModeDefault: 'normalized',
-  },
-});
-
-const uiConfig = JSON.parse(JSON.stringify(DEFAULT_UI_CONFIG));
-
-const applyNumberConfig = (target, key, value, { min = 0, max = Number.POSITIVE_INFINITY } = {}) => {
-  if (typeof value !== 'number' || Number.isNaN(value)) return;
-  if (value < min || value > max) return;
-  target[key] = value;
-};
-
-const applyStringConfig = (target, key, value, { allowed } = {}) => {
-  if (typeof value !== 'string' || !value) return;
-  if (allowed && !allowed.includes(value)) return;
-  target[key] = value;
-};
-
-const mergeFrontendConfig = (payload) => {
-  if (!payload || typeof payload !== 'object') return;
-  const heartbeat = payload.heartbeat;
-  if (heartbeat && typeof heartbeat === 'object') {
-    applyNumberConfig(uiConfig.heartbeat, 'intervalMs', heartbeat.interval_ms, { min: 1000 });
-    applyNumberConfig(uiConfig.heartbeat, 'jitterMs', heartbeat.jitter_ms, { min: 0 });
-    applyNumberConfig(uiConfig.heartbeat, 'minGapMs', heartbeat.min_gap_ms, { min: 0 });
-    applyNumberConfig(uiConfig.heartbeat, 'interactionGapMs', heartbeat.interaction_gap_ms, { min: 0 });
-    applyNumberConfig(uiConfig.heartbeat, 'idleThresholdMs', heartbeat.idle_threshold_ms, { min: 0 });
-    applyNumberConfig(uiConfig.heartbeat, 'failThreshold', heartbeat.fail_threshold, { min: 1 });
-    applyNumberConfig(uiConfig.heartbeat, 'staleMultiplier', heartbeat.stale_multiplier, { min: 1 });
-    applyNumberConfig(uiConfig.heartbeat, 'healthCheckIntervalMs', heartbeat.health_check_interval_ms, { min: 1000 });
-    applyNumberConfig(uiConfig.heartbeat, 'healthCheckJitterMs', heartbeat.health_check_jitter_ms, { min: 0 });
-  }
-  const rendering = payload.rendering;
-  if (rendering && typeof rendering === 'object') {
-    applyNumberConfig(uiConfig.rendering, 'batchSize', rendering.batch_size, { min: 1 });
-    applyNumberConfig(uiConfig.rendering, 'scrollThresholdPx', rendering.scroll_threshold_px, { min: 0 });
-  }
-  const history = payload.history;
-  if (history && typeof history === 'object') {
-    applyNumberConfig(uiConfig.history, 'maxItems', history.max_items, { min: 1 });
-  }
-  const range = payload.range;
-  if (range && typeof range === 'object') {
-    applyNumberConfig(uiConfig.range, 'max', range.max, { min: 0 });
-    applyNumberConfig(uiConfig.range, 'defaultValue', range.default, { min: 0 });
-  }
-  const search = payload.search;
-  if (search && typeof search === 'object') {
-    applyStringConfig(uiConfig.search, 'spaceModeDefault', search.space_mode_default, { allowed: ['none', 'jp', 'all'] });
-    applyStringConfig(uiConfig.search, 'normalizeModeDefault', search.normalize_mode_default, { allowed: ['normalized', 'exact'] });
-  }
-  // Clamp default to max if default exceeds max
-  if (uiConfig.range.defaultValue > uiConfig.range.max) {
-    uiConfig.range.defaultValue = uiConfig.range.max;
-  }
-};
-
-const normalizeSystemVersion = (value) => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-};
-
-const loadFrontendConfig = async () => {
-  try {
-    const res = await fetch(`/api/config?ts=${Date.now()}`);
-    if (!res.ok) {
-      console.warn(`Failed to load frontend config: HTTP ${res.status}`);
-      return false;
-    }
-    const payload = await res.json();
-    const version = normalizeSystemVersion(payload?.system_version);
-    if (version) {
-      state.systemVersion = version;
-      renderStatusChips();
-    }
-    const configPayload = payload?.frontend || payload?.config || payload;
-    mergeFrontendConfig(configPayload);
-    return true;
-  } catch (err) {
-    console.warn('Failed to load frontend config', err);
-    return false;
-  }
-};
-
-const applyUiConfig = () => {
-  if (rangeInput) {
-    rangeInput.max = String(uiConfig.range.max);
-    rangeInput.value = String(uiConfig.range.defaultValue);
-  }
-  if (spaceModeSelect) {
-    const value = uiConfig.search.spaceModeDefault;
-    if (spaceModeSelect.querySelector(`option[value="${value}"]`)) {
-      spaceModeSelect.value = value;
-      state.spaceMode = value;
-    }
-  }
-  if (normalizeModeSelect) {
-    const value = uiConfig.search.normalizeModeDefault;
-    if (normalizeModeSelect.querySelector(`option[value="${value}"]`)) {
-      normalizeModeSelect.value = value;
-      state.normalizeMode = value;
-    }
-  }
-};
-
-// ═══════════════════════════════════════════════════════════════
 // HEARTBEAT
 // ═══════════════════════════════════════════════════════════════
 
 const HEARTBEAT_CLIENT_KEY = 'fts_client_id';
-const getHeartbeatStaleMs = () => (
-  uiConfig.heartbeat.intervalMs * uiConfig.heartbeat.staleMultiplier + uiConfig.heartbeat.jitterMs
-);
+const HEARTBEAT_INTERVAL_MS = 35000;
+const HEARTBEAT_JITTER_MS = 10000;
+const HEARTBEAT_MIN_GAP_MS = 5000;
+const HEARTBEAT_INTERACTION_GAP_MS = 15000;
+const HEARTBEAT_IDLE_THRESHOLD_MS = 90000;
+const HEARTBEAT_FAIL_THRESHOLD = 2;
+const HEARTBEAT_STALE_MULTIPLIER = 2;
+const HEARTBEAT_STALE_MS = HEARTBEAT_INTERVAL_MS * HEARTBEAT_STALE_MULTIPLIER + HEARTBEAT_JITTER_MS;
+const HEALTH_CHECK_INTERVAL_MS = 5000;
+const HEALTH_CHECK_JITTER_MS = 3000;
 
 let heartbeatTimer = null;
 let heartbeatInFlight = false;
@@ -258,10 +129,12 @@ let lastHeartbeatAt = 0;
 let lastHeartbeatSuccessAt = 0;
 let lastInteractionHeartbeatAt = 0;
 let lastUserActivityAt = 0;
+let lastActivityMarkAt = 0;
 let consecutiveHeartbeatFailures = 0;
 let healthTimer = null;
 let healthInFlight = false;
 let healthPollingEnabled = false;
+const ACTIVITY_MARK_GAP_MS = 250;
 
 const CONNECTION_STATUS = {
   connecting: 'connecting',
@@ -290,8 +163,8 @@ const sendHeartbeat = async (reason = 'interval', force = false) => {
   if (!heartbeatEnabled) return;
   if (heartbeatInFlight) return;
   const now = Date.now();
-  if (!force && now - lastHeartbeatAt < uiConfig.heartbeat.minGapMs) return;
-  if (!force && lastUserActivityAt && now - lastUserActivityAt > uiConfig.heartbeat.idleThresholdMs) return;
+  if (!force && now - lastHeartbeatAt < HEARTBEAT_MIN_GAP_MS) return;
+  if (!force && lastUserActivityAt && now - lastUserActivityAt > HEARTBEAT_IDLE_THRESHOLD_MS) return;
   heartbeatInFlight = true;
   try {
     const res = await fetch('/api/heartbeat', {
@@ -308,8 +181,8 @@ const sendHeartbeat = async (reason = 'interval', force = false) => {
   } catch (err) {
     console.warn('heartbeat failed', reason, err);
     consecutiveHeartbeatFailures += 1;
-    const stale = lastHeartbeatSuccessAt && now - lastHeartbeatSuccessAt > getHeartbeatStaleMs();
-    if (consecutiveHeartbeatFailures >= uiConfig.heartbeat.failThreshold || stale) {
+    const stale = lastHeartbeatSuccessAt && now - lastHeartbeatSuccessAt > HEARTBEAT_STALE_MS;
+    if (consecutiveHeartbeatFailures >= HEARTBEAT_FAIL_THRESHOLD || stale) {
       transitionToDisconnected();
     }
   } finally {
@@ -320,19 +193,29 @@ const sendHeartbeat = async (reason = 'interval', force = false) => {
 
 const scheduleHeartbeat = () => {
   if (!heartbeatEnabled) return;
-  const jitter = Math.floor(Math.random() * uiConfig.heartbeat.jitterMs);
+  const jitter = Math.floor(Math.random() * HEARTBEAT_JITTER_MS);
   clearTimeout(heartbeatTimer);
   heartbeatTimer = setTimeout(async () => {
     await sendHeartbeat('interval');
     scheduleHeartbeat();
-  }, uiConfig.heartbeat.intervalMs + jitter);
+  }, HEARTBEAT_INTERVAL_MS + jitter);
 };
 
 const handleHeartbeatInteraction = () => {
   if (!heartbeatEnabled) return;
   const now = Date.now();
+  if (now - lastActivityMarkAt < ACTIVITY_MARK_GAP_MS) return;
+  const wasIdle = HEARTBEAT_IDLE_THRESHOLD_MS > 0
+    && lastUserActivityAt
+    && (now - lastUserActivityAt > HEARTBEAT_IDLE_THRESHOLD_MS);
+  lastActivityMarkAt = now;
   lastUserActivityAt = now;
-  if (now - lastInteractionHeartbeatAt < uiConfig.heartbeat.interactionGapMs) return;
+  if (wasIdle) {
+    lastInteractionHeartbeatAt = now;
+    sendHeartbeat('activity-resume', true);
+    return;
+  }
+  if (now - lastInteractionHeartbeatAt < HEARTBEAT_INTERACTION_GAP_MS) return;
   lastInteractionHeartbeatAt = now;
   sendHeartbeat('interaction', true);
 };
@@ -357,14 +240,14 @@ const stopHealthPolling = () => {
 
 const scheduleHealthCheck = () => {
   if (!healthPollingEnabled) return;
-  const jitter = Math.floor(Math.random() * uiConfig.heartbeat.healthCheckJitterMs);
+  const jitter = Math.floor(Math.random() * HEALTH_CHECK_JITTER_MS);
   clearTimeout(healthTimer);
   healthTimer = setTimeout(async () => {
     if (!healthPollingEnabled) return;
     await checkHealth();
     if (!healthPollingEnabled) return;
     scheduleHealthCheck();
-  }, uiConfig.heartbeat.healthCheckIntervalMs + jitter);
+  }, HEALTH_CHECK_INTERVAL_MS + jitter);
 };
 
 const startHealthPolling = () => {
@@ -412,22 +295,43 @@ const checkHealth = async () => {
 const initHeartbeat = () => {
   state.clientId = getClientId();
   lastUserActivityAt = Date.now();
+  lastActivityMarkAt = lastUserActivityAt;
   setConnectionStatus(CONNECTION_STATUS.connecting);
   heartbeatEnabled = true;
   sendHeartbeat('init', true);
   scheduleHeartbeat();
   window.addEventListener('focus', () => {
     lastUserActivityAt = Date.now();
+    lastActivityMarkAt = lastUserActivityAt;
     sendHeartbeat('focus', true);
   });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
       lastUserActivityAt = Date.now();
+      lastActivityMarkAt = lastUserActivityAt;
       sendHeartbeat('visible', true);
     }
   });
-  ['click', 'keydown', 'pointerdown', 'touchstart'].forEach((eventName) => {
-    document.addEventListener(eventName, handleHeartbeatInteraction);
+  const activityEvents = [
+    'click',
+    'keydown',
+    'pointerdown',
+    'touchstart',
+    'scroll',
+    'wheel',
+    'pointermove',
+    'mousemove',
+    'touchmove',
+  ];
+  if ('PointerEvent' in window) {
+    const mouseIdx = activityEvents.indexOf('mousemove');
+    if (mouseIdx !== -1) activityEvents.splice(mouseIdx, 1);
+  }
+  activityEvents.forEach((eventName) => {
+    const options = (eventName === 'scroll' || eventName === 'wheel')
+      ? { passive: true, capture: true }
+      : { passive: true };
+    document.addEventListener(eventName, handleHeartbeatInteraction, options);
   });
 };
 
@@ -509,6 +413,8 @@ const toggleTheme = () => {
 // ═══════════════════════════════════════════════════════════════
 
 const HISTORY_STORAGE_KEY = 'searchQueryHistory';
+const HISTORY_MAX_ITEMS = 30;
+
 const loadQueryHistory = () => {
   try {
     const stored = localStorage.getItem(HISTORY_STORAGE_KEY);
@@ -519,7 +425,6 @@ const loadQueryHistory = () => {
     console.warn('Failed to load query history', err);
     state.queryHistory = [];
   }
-  enforceHistoryLimit();
 };
 
 const saveQueryHistory = () => {
@@ -528,13 +433,6 @@ const saveQueryHistory = () => {
   } catch (err) {
     console.warn('Failed to save query history', err);
   }
-};
-
-const enforceHistoryLimit = () => {
-  const pinned = state.queryHistory.filter(item => item.pinned);
-  const unpinned = state.queryHistory.filter(item => !item.pinned).slice(0, uiConfig.history.maxItems);
-  state.queryHistory = [...pinned, ...unpinned];
-  saveQueryHistory();
 };
 
 const addToQueryHistory = (query, mode, range, spaceMode, normalizeMode, folders, resultCount, indexUuid) => {
@@ -570,7 +468,11 @@ const addToQueryHistory = (query, mode, range, spaceMode, normalizeMode, folders
   state.queryHistory.unshift(historyItem);
 
   // Keep only max items (excluding pinned)
-  enforceHistoryLimit();
+  const pinned = state.queryHistory.filter(item => item.pinned);
+  const unpinned = state.queryHistory.filter(item => !item.pinned).slice(0, HISTORY_MAX_ITEMS);
+  state.queryHistory = [...pinned, ...unpinned];
+
+  saveQueryHistory();
 };
 
 const togglePinHistory = (itemId) => {
@@ -600,16 +502,7 @@ const renderStatusChips = () => {
   const ready = state.folders.filter(f => f.ready).length;
   const connectionChip = getConnectionChip();
   const folderChip = getFolderStatusChip(total, ready);
-  const versionChip = getVersionChip();
-  statusChips.innerHTML = `${connectionChip}${folderChip}${versionChip}`;
-};
-
-const getVersionChip = () => {
-  if (!state.systemVersion) return '';
-  const trimmed = state.systemVersion.trim();
-  if (!trimmed) return '';
-  const label = trimmed.startsWith('v') ? trimmed : `v${trimmed}`;
-  return `<span class="chip subtle">${escapeHtml(label)}</span>`;
+  statusChips.innerHTML = `${connectionChip}${folderChip}`;
 };
 
 const getConnectionChip = () => {
@@ -655,7 +548,7 @@ const renderFolderStatus = (folders) => {
         <span class="status-dot"></span>
         <div class="status-info">
           <span class="status-name">未設定</span>
-          <span class="status-detail">config.json の search.folders を設定してください</span>
+          <span class="status-detail">.env で SEARCH_FOLDERS を設定してください</span>
         </div>
       </div>
     `;
@@ -1457,7 +1350,7 @@ const appendNextBatch = () => {
   if (state.renderedCount >= list.length) return;
   state.isRenderingBatch = true;
   const start = state.renderedCount;
-  const end = Math.min(start + uiConfig.rendering.batchSize, list.length);
+  const end = Math.min(start + 100, list.length);
   const slice = list.slice(start, end);
   const listEl = resultsEl.querySelector('.results-list');
   const html = state.viewMode === 'file'
@@ -1473,7 +1366,7 @@ const appendNextBatch = () => {
 
 const handleResultsScroll = () => {
   if (!state.results.length || state.isRenderingBatch) return;
-  if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - uiConfig.rendering.scrollThresholdPx) {
+  if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 200) {
     appendNextBatch();
   }
 };
@@ -1928,16 +1821,11 @@ if (clearFilterBtn) {
 // ═══════════════════════════════════════════════════════════════
 
 window.addEventListener('DOMContentLoaded', () => {
-  const init = async () => {
-    initTheme();
-    await loadFrontendConfig();
-    applyUiConfig();
-    loadQueryHistory();
-    initHeartbeat();
-    setMode('AND');
-    loadFolders();
-    queryInput.focus();
-    updateFolderToggleLabel();
-  };
-  init();
+  initTheme();
+  loadQueryHistory();
+  initHeartbeat();
+  setMode('AND');
+  loadFolders();
+  queryInput.focus();
+  updateFolderToggleLabel();
 });
