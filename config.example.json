@@ -31,6 +31,19 @@
     "health_check_interval_ms": 5000,
     "health_check_jitter_ms": 3000
   },
+  "heartbeat": {
+    "ttl_sec": 90,
+    "max_clients": null
+  },
+  "warmup": {
+    "enabled": true,
+    "idle_sec": 1800,
+    "interval_sec": 3600,
+    "max_files": 40,
+    "head_mb": 2,
+    "stride_mb": 4,
+    "max_mb": 0
+  },
   "query": {
     "normalize": "nfkc_casefold"
   },

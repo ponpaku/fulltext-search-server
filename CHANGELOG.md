@@ -8,6 +8,7 @@ System Version: 1.3.1
 - 2026-01-19: 調整: heartbeat の送信判定を改善（ユーザー操作検出の強化・二重発火の抑制）。
 - 2026-01-19: 更新: README を簡略化し、`docs/operations.md` に設定一覧/運用/FAQ を整理。
 - 2026-01-19: 更新: README/AGENTS/CLAUDE の案内整合を調整し、運用ドキュメント参照を明確化。
+- 2026-01-19: 追加: warmup/heartbeat のサーバ設定を config.json で指定可能に。
 
 ## 1.3.0
 

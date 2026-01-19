@@ -45,6 +45,25 @@ README は概要と使い方に絞り、運用・詳細設定は本ドキュメ�
 | health_check_interval_ms | 数値 | `5000` | health確認間隔（ms） |
 | health_check_jitter_ms | 数値 | `3000` | healthジッター（ms） |
 
+### heartbeat（サーバ）
+`front.heartbeat_*` はクライアント送信間隔、`heartbeat.*` はサーバ側のTTL/上限です。
+
+| キー | 型 | 既定値 | 説明 |
+| --- | --- | --- | --- |
+| ttl_sec | 数値 | `90` | アクティブ判定のTTL（秒） |
+| max_clients | 数値 / null | `null` | 同時クライアント上限（`null` で自動算出、`0` は `1` に丸められる） |
+
+### warmup
+| キー | 型 | 既定値 | 説明 |
+| --- | --- | --- | --- |
+| enabled | 真偽値 | `true` | warmup を有効化 |
+| idle_sec | 数値 | `1800` | アイドル判定（秒） |
+| interval_sec | 数値 | `3600` | 再実行間隔（秒） |
+| max_files | 数値 | `40` | 対象ファイル数上限 |
+| head_mb | 数値 | `2` | 先頭ウォームアップ量（MB） |
+| stride_mb | 数値 | `4` | ストライド量（MB） |
+| max_mb | 数値 | `0` | 1ファイルの上限（MB、0=無制限） |
+
 ### query
 | キー | 型 | 既定値 | 説明 |
 | --- | --- | --- | --- |
@@ -97,6 +116,7 @@ README は概要と使い方に絞り、運用・詳細設定は本ドキュメ�
 
 ## 3. .env（環境依存・秘密・一時上書き）
 `.env` に書くのは次のような「環境依存」または「運用上の一時的上書き」に限定するのが推奨です。
+heartbeat/warmup も `config.json` で設定可能なので、`.env` は上書き用途として利用します。
 
 ```env
 # 起動ポート
@@ -113,7 +133,7 @@ README は概要と使い方に絞り、運用・詳細設定は本ドキュメ�
 
 # ハートビートTTL/上限
 # HEARTBEAT_TTL_SEC=90
-# HEARTBEAT_MAX_CLIENTS=0
+# HEARTBEAT_MAX_CLIENTS=0  # 0 は 1 扱い（自動にはならない）
 
 # warmup（ページキャッシュ維持）
 # WARMUP_ENABLED=1

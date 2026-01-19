@@ -230,6 +230,19 @@ def apply_config_defaults(config: Dict[str, Any]) -> None:
     _set_env_if_absent("FRONT_HEALTH_CHECK_INTERVAL_MS", _to_env_value(front.get("health_check_interval_ms")))
     _set_env_if_absent("FRONT_HEALTH_CHECK_JITTER_MS", _to_env_value(front.get("health_check_jitter_ms")))
 
+    heartbeat = config.get("heartbeat", {}) if isinstance(config.get("heartbeat"), dict) else {}
+    _set_env_if_absent("HEARTBEAT_TTL_SEC", _to_env_value(heartbeat.get("ttl_sec")))
+    _set_env_if_absent("HEARTBEAT_MAX_CLIENTS", _to_env_value(heartbeat.get("max_clients")))
+
+    warmup = config.get("warmup", {}) if isinstance(config.get("warmup"), dict) else {}
+    _set_env_if_absent("WARMUP_ENABLED", _to_env_value(warmup.get("enabled")))
+    _set_env_if_absent("WARMUP_IDLE_SEC", _to_env_value(warmup.get("idle_sec")))
+    _set_env_if_absent("WARMUP_INTERVAL_SEC", _to_env_value(warmup.get("interval_sec")))
+    _set_env_if_absent("WARMUP_MAX_FILES", _to_env_value(warmup.get("max_files")))
+    _set_env_if_absent("WARMUP_HEAD_MB", _to_env_value(warmup.get("head_mb")))
+    _set_env_if_absent("WARMUP_STRIDE_MB", _to_env_value(warmup.get("stride_mb")))
+    _set_env_if_absent("WARMUP_MAX_MB", _to_env_value(warmup.get("max_mb")))
+
     query = config.get("query", {}) if isinstance(config.get("query"), dict) else {}
     _set_env_if_absent("QUERY_NORMALIZE", _to_env_value(query.get("normalize")))
 
