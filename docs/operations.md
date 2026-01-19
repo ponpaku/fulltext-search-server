@@ -131,18 +131,6 @@ heartbeat/warmup も `config.json` で設定可能なので、`.env` は上書�
 # config.json のパス
 # CONFIG_PATH="config.json"
 
-# ハートビートTTL/上限
-# HEARTBEAT_TTL_SEC=90
-# HEARTBEAT_MAX_CLIENTS=0  # 0 は 1 扱い（自動にはならない）
-
-# warmup（ページキャッシュ維持）
-# WARMUP_ENABLED=1
-# WARMUP_IDLE_SEC=1800
-# WARMUP_INTERVAL_SEC=3600
-# WARMUP_MAX_FILES=40
-# WARMUP_HEAD_MB=2
-# WARMUP_STRIDE_MB=4
-# WARMUP_MAX_MB=0
 ```
 
 ## 4. 抽出の限界
