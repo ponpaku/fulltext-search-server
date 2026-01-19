@@ -12,9 +12,9 @@ if not exist "%ACTIVATE_BAT%" (
     python -m venv "%VENV_DIR%"
 )
 call "%ACTIVATE_BAT%"
-pip install --upgrade pip
+pip install -q --upgrade pip
 if exist "%PROJECT_ROOT%requirements.txt" (
-    pip install -r "%PROJECT_ROOT%requirements.txt"
+    pip install -q -r "%PROJECT_ROOT%requirements.txt"
 )
 
 python "%PROJECT_ROOT%app.py"

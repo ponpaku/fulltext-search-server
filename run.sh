@@ -14,9 +14,9 @@ fi
 
 # shellcheck disable=SC1090
 source "${ACTIVATE_SH}"
-python -m pip install --upgrade pip
+python -m pip install -q --upgrade pip
 if [[ -f "${PROJECT_ROOT}/requirements.txt" ]]; then
-  python -m pip install -r "${PROJECT_ROOT}/requirements.txt"
+  python -m pip install -q -r "${PROJECT_ROOT}/requirements.txt"
 fi
 
 python "${PROJECT_ROOT}/app.py"
