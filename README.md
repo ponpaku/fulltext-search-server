@@ -24,8 +24,6 @@ UI は `static/` 配下で提供されます。
 uvicorn app:app --host 0.0.0.0 --port 80
 ```
 
-`.env` を使う場合は同ディレクトリに配置してください。
-
 ## 簡易起動スクリプト
 ### Windows
 - `run.bat` を実行
@@ -49,6 +47,16 @@ chmod +x run.sh
 - 事前にOS側で共有フォルダを認証・マウントしてから起動してください。
 - アプリ側では資格情報を扱わず、OSの認証済みパスをそのまま利用します。
 
+## 注意（抜粋）
+- スキャンPDF（画像のみ）は本文を抽出できない場合があります（OCR非対応）
+- パスワード付き/破損ファイルはスキップされる可能性があります
+- SMB/NAS では更新時刻が信用できない場合があるため、差分判定モードの設定に注意してください
+
+## トラブルシューティング（抜粋）
+- 検索漏れがある: スキャンPDF/差分判定モード/共有フォルダの更新時刻を確認
+- 変更が反映されない: `diff.mode` を `fastfp` または `fullhash` にして再構築
+- 起動に失敗: `config.json` の存在と JSON 構文を確認
+
 ## タスクスケジューラー登録例（Windows）
 - 基本: アクションは `run.bat` を指定
 - コンソールを表示したい場合:
@@ -60,98 +68,11 @@ chmod +x run.sh
 ### config.json（アプリ設定）
 `config.example.json` をコピーして `config.json` を作成し、アプリ設定を記載してください。
 `config.json` が見つからない場合は起動を停止します。
-保存場所を変える場合は `.env` の `CONFIG_PATH` を利用してください。
 
-**優先順位**: `.env / OS環境変数` > `config.json` > 既定値
-（運用で即時切替したい値は `.env` 側で上書きできます。`.env` に空値 `VAR=` を指定した場合は未設定として扱われ、config.json の値が適用されます。）
+詳細な設定例・運用解説は `docs/operations.md` を参照してください。
 
-#### 旧バージョンからの移行
-1.2.x 以前で `.env` に記載していた設定項目（`SEARCH_FOLDERS`, `SEARCH_FOLDER_ALIASES` など）は `config.json` へ移管してください。
-運用中に一時的に値を変えたい場合のみ `.env` を利用します。
-
-```json
-{
-  "search": {
-    "folders": [
-      {"label": "規程", "path": "C:\\\\path\\\\to\\\\folder1"},
-      {"label": "議事録", "path": "//192.168.0.10/share/folder2"}
-    ],
-    "folder_aliases": {
-      "192.168.0.10": "share"
-    },
-    "execution_mode": "thread",
-    "process_shared": true,
-    "cpu_budget": 6,
-    "concurrency": 6,
-    "workers": 6
-  },
-  "front": {
-    "results_batch_size": 100,
-    "range_default": 0,
-    "space_mode_default": "jp",
-    "normalize_mode_default": "normalized"
-  },
-  "query": {
-    "normalize": "nfkc_casefold"
-  },
-  "query_stats": {
-    "ttl_days": 30,
-    "flush_sec": 60
-  },
-  "cache": {
-    "fixed_min_count": 10,
-    "fixed_min_time_ms": 500,
-    "fixed_min_hits": 5000,
-    "fixed_min_kb": 2000,
-    "fixed_ttl_days": 7,
-    "fixed_max_entries": 20,
-    "fixed_trigger_cooldown_sec": 300,
-    "mem_max_mb": 200,
-    "mem_max_entries": 200,
-    "mem_max_result_kb": 2000,
-    "compress_min_kb": 2000
-  },
-  "rebuild": {
-    "schedule": "03:00",
-    "allow_shrink": true
-  },
-  "index": {
-    "keep_generations": 3,
-    "keep_days": 30,
-    "max_bytes": 0,
-    "cleanup_grace_sec": 300,
-    "store_normalized": true
-  },
-  "diff": {
-    "mode": "stat",
-    "fast_fp_bytes": 65536,
-    "full_hash_algo": "sha256",
-    "full_hash_paths": ["D:\\\\share\\\\secure", "\\\\\\\\NAS\\\\docs"],
-    "full_hash_exts": [".pdf", ".docx"]
-  }
-}
-```
-
-### .env（運用依存/秘密情報/一時切替）
-```env
-# 起動ポートを変えたい場合のみ指定（デフォルト: 80）
-# PORT=80
-
-# SSL 証明書ディレクトリ（lan-cert.pem / lan-key.pem）
-# CERT_DIR="certs"
-
-# デバッグログを有効化（1/0）
-# SEARCH_DEBUG=1
-
-# config.json のパス（デフォルト: ./config.json）
-# CONFIG_PATH="config.json"
-
-# 検索実行モード（thread/process）
-# SEARCH_EXECUTION_MODE=thread
-
-# processモードで共有メモリ(mmap)を使うか（デフォルト: 1）
-# SEARCH_PROCESS_SHARED=1
-```
+## 運用ドキュメント
+README は概要と使い方に絞り、運用・詳細設定は `docs/operations.md` にまとめています。
 
 ## インデックス
 - 起動時に全フォルダを走査して `indexes/gen_<uuid>/` に保存
@@ -160,57 +81,11 @@ chmod +x run.sh
 - 世代管理により、再構築中も検索が継続稼働
 - 保持ポリシー（世代数/日数/容量）により古い世代を自動削除
 
-### 世代管理
-- 再構築時は `indexes/.build/gen_<uuid>/` で新世代を構築
-- 完了後に `indexes/gen_<uuid>/` へ移動し、`current.txt` を更新
-- 古い世代は保持ポリシーに従って自動削除
-- 各世代に `manifest.json` を配置（メタデータ）
-
-### 保持ポリシーの詳細
-- `INDEX_KEEP_GENERATIONS`: 保持する世代数（現在の世代と猶予期間中の世代を除く）
-- `INDEX_KEEP_DAYS`: 作成日からの保持期間（日数、0=無制限）
-- `INDEX_MAX_BYTES`: **全世代の合計ディスク使用量の上限**（現在の世代と猶予期間中の世代を含む、0=無制限）
-  - サイズ計算には猶予期間中の世代も含まれる
-  - 超過した場合、猶予期間を過ぎた古い世代から順に削除される
-  - 現在の世代と猶予期間中の世代は削除されないため、これらだけで上限を超える場合は削除されない
-- `INDEX_CLEANUP_GRACE_SEC`: 世代切替後の猶予期間（秒、デフォルト: 300）
-  - 猶予期間中の世代は削除されないが、サイズ計算には含まれる
-
-### ロールバック手順
-問題が発生した場合、手動で前の世代に戻すことができます：
-
-1. サーバーを停止
-2. `indexes/` ディレクトリ内の世代を確認：
-   ```bash
-   ls -lt indexes/gen_*
-   ```
-3. 戻したい世代の UUID を確認（例: `1704715496_abc12345`）
-4. `current.txt` を手動で編集：
-   ```bash
-   echo "1704715496_abc12345" > indexes/current.txt
-   ```
-5. サーバーを再起動
-
-**注意**: ロールバック後は、現在の世代より新しい世代は自動削除されません。
-必要に応じて手動で削除してください。
-
-## 検索キャッシュ
-- メモリキャッシュは LRU 方式で小さい結果を高速化
-- 固定キャッシュは「頻出かつ重い検索」を対象にディスク保存（`cache/`）
-- インデックス更新後に固定キャッシュを再生成して精度を維持
-- 検索条件が閾値に達した場合は自動で固定キャッシュを再構築
-
-## 検索の並列化
-- フォルダ単位は直列、ページ単位は並列
-- 並列数は「アクティブクライアント数」で動的に配分
-  - `SEARCH_WORKERS` は1リクエストあたりの上限
-  - アクティブ数は心拍（TTL内の client_id）で推定
-  - client_id はブラウザの localStorage に保存（同一ブラウザの複数タブは1クライアント扱い）
-- 同時リクエスト数は `SEARCH_CONCURRENCY` で制御
+詳細（世代管理/保持ポリシー/ロールバック）は `docs/operations.md` を参照してください。
 
 ## 注意点
 - Windows の process モードは spawn のため、ワーカー数に応じてメモリが増えます
-- `SEARCH_PROCESS_SHARED=1`（既定）ではページ本文が共有 mmap になり増加は抑制されます
+- 共有 mmap を有効にするとページ本文が共有され、メモリ増加は抑制されます
 - PDFのレイアウトによっては抽出順序が混ざる場合があります
 
 ## 変更履歴

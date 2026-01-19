@@ -11,6 +11,7 @@ System Version: 1.3.1
 - `app.py`: エントリポイント（ASGI app）。
 - `backend/`: API/検索/インデックス/キャッシュ/並列化の中核。
 - `static/`: UI（`index.html`, `app.js`, `styles.css`）。
+- `docs/operations.md`: 運用・設定の詳細ドキュメント。
 - `indexes/`: 生成物。インデックス gzip pickle（コミットしない）。
 - `cache/`: 生成物。固定キャッシュ等（コミットしない）。
 - `backups/`: 参考スナップショット（コミットしない）。
@@ -22,6 +23,8 @@ System Version: 1.3.1
 - 変更前に `README.md` と `AGENTS.md` を確認し、既存仕様と矛盾しないようにする。
 - 変更後は `CHANGELOG.md` を日本語で更新。
 - 生成物ディレクトリ（`indexes/`, `cache/`, `backups/`）は編集しない。
+- 挙動や設定項目を変更した場合は、`README.md` / `docs/operations.md` / `AGENTS.md` / `CLAUDE.md` を適切に更新する。
+- System Version を変更した場合は、`README.md` / `AGENTS.md` / `CLAUDE.md` / `CHANGELOG.md` を一致させる。
 
 ## 4. Common Commands
 - 推奨起動（Linux/macOS）: `./run.sh`

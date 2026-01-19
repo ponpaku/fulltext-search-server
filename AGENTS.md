@@ -32,6 +32,7 @@ System Version: 1.3.1
 - Search options: AND/OR, range (AND only), space removal (default: Japanese-only).
 
 # Configuration
+- 主要設定は `config.json` に記載し、詳細は `docs/operations.md` を参照。
 - SEARCH_FOLDERS: `label=path` list; supports `;`, `,`, `|` separators and inline `#` comments.
 - SEARCH_FOLDER_ALIASES: `host=alias` for display-only path replacement.
 - SEARCH_CONCURRENCY: concurrent search request limit (default: CPU count).
@@ -60,3 +61,8 @@ System Version: 1.3.1
 
 # Change Log Policy
 - `CHANGELOG.md` を日本語で更新してください。
+
+# Documentation Maintenance
+- 本ファイルは「現状の仕様・構成の一次情報」です。挙動や構成を変更した場合は必ず更新してください。
+- 設定項目（config.json/.env）を追加・削除・名称変更した場合は、`README.md` と `docs/operations.md`、`CLAUDE.md` の該当箇所も更新してください。
+- System Version を変更した場合は、`README.md` / `AGENTS.md` / `CLAUDE.md` / `CHANGELOG.md` を一致させてください。
