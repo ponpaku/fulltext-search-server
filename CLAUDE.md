@@ -48,3 +48,5 @@ System Version: 1.3.1
 ## 8. Safety / Secrets
 - `.env`、`certs/`（`lan-cert.pem` / `lan-key.pem`）、`indexes/`、`cache/`、`backups/` はコミットしない。
 - 検索対象ファイル（PDF/DOCX/TXT/CSV/XLSX/XLS）は機密の可能性があるため、コード変更時に同梱しない。
+- `.env` と `config.json` の中身は閲覧しない。
+- `indexes/` 配下のインデックスファイルの中身は閲覧しない。

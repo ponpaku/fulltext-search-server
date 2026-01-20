@@ -66,3 +66,7 @@ System Version: 1.3.1
 - 本ファイルは「現状の仕様・構成の一次情報」です。挙動や構成を変更した場合は必ず更新してください。
 - 設定項目（config.json/.env）を追加・削除・名称変更した場合は、`README.md` と `docs/operations.md`、`CLAUDE.md` の該当箇所も更新してください。
 - System Version を変更した場合は、`README.md` / `AGENTS.md` / `CLAUDE.md` / `CHANGELOG.md` を一致させてください。
+
+# 取り扱い注意
+- `.env` と `config.json` の中身は閲覧しない。
+- `indexes/` 配下のインデックスファイルの中身は閲覧しない。
